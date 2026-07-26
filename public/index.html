@@ -1,0 +1,1022 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSG Agency Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;height:100%;background:#F3F4F6;font-family:'Instrument Sans',system-ui,sans-serif}
+*{box-sizing:border-box}
+a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
+.tile{transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease}
+.tile:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(20,25,40,.10);border-color:#d7d7d2}
+.railitem{transition:background .12s ease}
+.rowh:hover{background:#FAFAF7}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+(function(){
+  "use strict";
+
+  // ------------------------------------------------------------------
+  // State
+  // ------------------------------------------------------------------
+  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false };
+  function setState(patch){ Object.assign(state, patch); render(); }
+
+  // Per-section data source: 'sample' until a live fetch succeeds, then 'live'.
+  var sources = { renewals:'sample', tasks:'sample', commissions:'sample', cases:'sample', carrier:'sample' };
+  var selRenewal = null;  // live renewal row chosen for the detail overlay
+  var carrierData = null; // cached carrier directory from carrierhub
+  // Full apps embedded in the hybrid workspaces, reachable over the tailnet.
+  var CARRIERHUB_EMBED = 'http://100.75.67.72:3200/';
+  var COMMISSION_EMBED = 'http://100.75.67.72:3100/';
+  // NextCloud (Files + Talk). Framing is allowed only from the tailnet HTTPS
+  // origin (frame-ancestors https://*.tail1cbc83.ts.net:*), so these panes load
+  // when the portal is opened at https://hermes-gretch.tail1cbc83.ts.net:8447/.
+  var NEXTCLOUD_BASE = 'https://nextcloud-x6wle-u69864.vm.elestio.app';
+  var STORAGE_EMBED = NEXTCLOUD_BASE + '/apps/files/';
+  var TALK_EMBED = NEXTCLOUD_BASE + '/apps/spreed/';
+  // True when the portal itself is served from the tailnet HTTPS origin that
+  // NextCloud allows to frame it. Over IP:3400 the NextCloud panes are blocked.
+  function onTailnetHttps(){ try { return location.protocol==='https:' && /\.ts\.net$/i.test(location.hostname); } catch(e){ return false; } }
+
+  // Full-pane embed for a top-level workspace (thin header + iframe, no back link).
+  function embedScreen(title, src, subtitle, accent){
+    var blocked = !onTailnetHttps();
+    var note = blocked
+      ? '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:40px"><div style="max-width:460px;text-align:center"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;margin-bottom:8px">'+title+' loads over the secure tailnet URL</div><div style="font-size:13px;color:#6B7078;line-height:1.55">NextCloud only allows embedding from the Tailscale HTTPS address. Open the portal at<br><a href="https://hermes-gretch.tail1cbc83.ts.net:8447/" style="color:#2563EB">https://hermes-gretch.tail1cbc83.ts.net:8447/</a><br>to use '+title+' here, or <a href="'+src+'" target="_blank" rel="noopener" style="color:#2563EB">open '+title+' in a new tab ↗</a>.</div></div></div>'
+      : '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+title+'" allow="camera; microphone; clipboard-read; clipboard-write; fullscreen"></iframe>';
+    return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
+      + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
+        + '<span style="width:8px;height:8px;border-radius:3px;background:'+(accent||'#4B77BE')+'"></span>'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+title+'</span>'
+        + '<span style="font-size:11.5px;color:#96999F">'+(subtitle||'via NextCloud')+'</span>'
+        + '<a href="'+src+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
+      + '</div>'
+      + note
+    + '</div>';
+  }
+
+  // Shared inline-embed pane: header bar (back + open-in-new-tab) + iframe.
+  function embedPane(backLabel, src, dataAttr, subtitle){
+    return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
+      + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
+        + '<div '+dataAttr+'="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ '+backLabel+'</div>'
+        + '<div style="width:1px;height:18px;background:#E2E1DC"></div>'
+        + '<span style="font-size:11.5px;color:#96999F">'+(subtitle||'Full app · live')+'</span>'
+        + '<a href="'+src+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
+      + '</div>'
+      + '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+backLabel+'"></iframe>'
+    + '</div>';
+  }
+  function anyLive(){ return Object.keys(sources).some(function(k){ return sources[k]==='live'; }); }
+
+  // ------------------------------------------------------------------
+  // Static data (ported from the design's renderVals)
+  // ------------------------------------------------------------------
+  var reg = [
+    { key:'crm',      mono:'CR', railLabel:'CRM',      name:'CRM',           accent:'#2F6B4F', tint:'#EAF1EC', desc:'Client book — accounts, policies, cases', stat:'414 clients',     stat2:'614 policies' },
+    { key:'renewals', mono:'RN', railLabel:'Renewals', name:'Renewals',      accent:'#C2410C', tint:'#F7EAE1', desc:'Retention & renewal worklist',            stat:'38 due',          stat2:'12 at risk' },
+    { key:'carrier',  mono:'CH', railLabel:'Carrier',  name:'Carrier Hub',   accent:'#2563EB', tint:'#E9EFFC', desc:'Appetite, appointments & submissions',    stat:'123 appointments',stat2:'$25.8k pipeline' },
+    { key:'intake',   mono:'IG', railLabel:'Intake',   name:'Intake',        accent:'#B9822A', tint:'#F6EEDB', desc:'Evidence in, assessed & verified out',    stat:'3 in review',     stat2:'writes locked' },
+    { key:'cases',    mono:'CS', railLabel:'Cases',    name:'Tasks & Cases', accent:'#16233F', tint:'#E7EAF0', desc:'Service work — endorsements, claims, COIs',stat:'14 open',         stat2:'3 overdue' },
+    { key:'finance',  mono:'CT', railLabel:'Finance',  name:'Finance',       accent:'#B9822A', tint:'#F7EEDB', desc:'Commissions — expected vs received',      stat:'$6,566 owed',     stat2:'7 variances' },
+    { key:'storage',  mono:'ST', railLabel:'Storage',  name:'Storage',       accent:'#4B77BE', tint:'#E9EEF7', desc:'NextCloud files & shared documents',      stat:'NextCloud',       stat2:'synced' },
+    { key:'team',     mono:'TM', railLabel:'Team',     name:'Team Chat',     accent:'#0F7B6C', tint:'#E4F1EF', desc:'Chat, questions & document sharing',      stat:'5 unread',        stat2:'3 channels' },
+    { key:'sops',     mono:'SO', railLabel:'SOPs',     name:'SOPs',          accent:'#8E3B5B', tint:'#F5E9EE', desc:'Standard operating procedures',           stat:'24 docs',         stat2:'2 updated' },
+  ];
+
+  var people = { lamar:{ name:'Lamar', initial:'L', accent:'#16233F' }, gretchen:{ name:'Gretchen', initial:'G', accent:'#8E3B5B' } };
+  var tasksByUser = {
+    lamar:[
+      { color:'#B9822A', text:'Chase $6,566 in commission shorts (4 carriers)', tag:'Finance', due:'Today' },
+      { color:'#16233F', text:'Review Example Contracting LLC intake',           tag:'Intake',  due:'Today' },
+      { color:'#2563EB', text:'Approve 2 carrier appointment requests',           tag:'Carrier', due:'Tomorrow' },
+      { color:'#2F6B4F', text:'Call Acme Roofing — renewal at risk',              tag:'CRM',     due:'Jul 24' },
+      { color:'#0F7B6C', text:'Reply in RSG — Renewal Updates',                   tag:'Team',    due:'Jul 24' },
+    ],
+    gretchen:[
+      { color:'#16233F', text:'Prep month-end reconciliation export',   tag:'Finance', due:'Today' },
+      { color:'#2F6B4F', text:'Send proposal to Miller Landscaping',     tag:'CRM',     due:'Today' },
+      { color:'#2F6B4F', text:'Follow up 5 lapse-check clients',         tag:'CRM',     due:'Tomorrow' },
+      { color:'#8E3B5B', text:'Update SOP: new-business intake flow',    tag:'SOPs',    due:'Jul 25' },
+      { color:'#2563EB', text:'Confirm appetite for Miller GL',          tag:'Carrier', due:'Jul 25' },
+    ],
+  };
+
+  var homeKpis = [
+    { label:'Renewals due', value:'38', sub:'need attention this week', color:'#2F6B4F' },
+    { label:'Money to chase', value:'$6,566', sub:'commission shorts', color:'#B9822A' },
+    { label:'Intake queue', value:'3', sub:'clients awaiting review', color:'#16233F' },
+    { label:'Unread', value:'5', sub:'across 3 team channels', color:'#0F7B6C' },
+  ];
+
+  // CRM
+  var crmNavRaw = [
+    { label:'Workspace', active:true,  d:'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z' },
+    { label:'Clients',   active:false, d:'M4 20a8 8 0 0 1 16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8' },
+    { label:'Policies',  active:false, d:'M7 3h7l5 5v13H7zM14 3v5h5' },
+    { label:'Pipeline',  active:false, d:'M3 5h18l-7 8v6l-4-2v-4z' },
+    { label:'Cases',     active:false, d:'M4 8h16v11H4zM9 8V5h6v3' },
+    { label:'Tasks',     active:false, d:'M5 6h11M5 12h11M5 18h7M18 15l2 2 4-4' },
+    { label:'Leads',     active:false, d:'M4 20V10M10 20V4M16 20v-7M22 20H2' },
+    { label:'Ask Hermes',active:false, d:'M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z' },
+  ];
+  var crmKpis = [
+    { label:'Clients', value:'414', sub:'canonical' }, { label:'Policies', value:'614', sub:'$2.78M annualized' }, { label:'Renewals', value:'38', sub:'need attention' },
+    { label:'Pipeline', value:'6', sub:'open opportunities' }, { label:'Open cases', value:'14', sub:'service work' }, { label:'Open tasks', value:'18', sub:'case-linked' },
+  ];
+  var crmCardsRaw = [
+    { name:'Clients', count:'414', desc:'NowCerts insured records', to:null },
+    { name:'Policies', count:'614', desc:'Coverage & premium mirrors', to:null },
+    { name:'Renewals', count:'38', desc:'Own workspace ↗', to:'renewals' },
+    { name:'Commissions', count:'104', desc:'Reconcile in Finance', to:'finance' },
+    { name:'Pipeline', count:'6', desc:'Quote-to-bind workflow', to:null },
+    { name:'Cases', count:'14', desc:'Agency service work ↗', to:'cases' },
+  ];
+
+  // Renewals
+  var renewalKpis = [
+    { label:'Due in 30 days', value:'38', sub:'across all lines', color:'#1B1D22' },
+    { label:'At risk', value:'12', sub:'no quote yet', color:'#B4231F' },
+    { label:'Retention YTD', value:'91%', sub:'target 90%', color:'#2F6B4F' },
+    { label:'Premium at renewal', value:'$1.24M', sub:'annualized', color:'#1B1D22' },
+  ];
+  var rStat = { 'At risk':['#B4231F','#FBE9E7'],'In progress':['#B9822A','#F7EEDB'],'Quoted':['#2563EB','#E9EFFC'],'Confirmed':['#2F6B4F','#EAF1EC'],'Not started':['#6B7078','#EFEFEC'] };
+  var renewalRows = [
+    { client:'Acme Roofing', line:'GL + BOP', premium:'$8,420', days:'1 day', status:'At risk', owner:'Gretchen' },
+    { client:'Miller Landscaping', line:'Commercial Auto', premium:'$12,100', days:'4 days', status:'In progress', owner:'Gretchen' },
+    { client:'Coastal HVAC', line:'Workers Comp', premium:'$22,300', days:'6 days', status:'Quoted', owner:'Lamar' },
+    { client:'Vertex Contracting', line:'Umbrella', premium:'$4,900', days:'9 days', status:'At risk', owner:'Lamar' },
+    { client:'Summit Electric', line:'GL', premium:'$6,750', days:'12 days', status:'Confirmed', owner:'Gretchen' },
+    { client:'Harbor Freight Co', line:'Property', premium:'$18,200', days:'15 days', status:'In progress', owner:'Lamar' },
+    { client:'Delta Plumbing', line:'BOP', premium:'$5,300', days:'21 days', status:'Not started', owner:'Gretchen' },
+    { client:'Ridgeline Builders', line:'GL + Umbrella', premium:'$14,600', days:'27 days', status:'Quoted', owner:'Lamar' },
+  ];
+  var acme = { client:'Acme Roofing LLC', line:'General Liability + BOP', status:'At risk', statusColor:'#B4231F', statusBg:'#FBE9E7', renews:'Jul 24, 2026 (1 day)', priorPremium:'$7,980', address:'2140 Industrial Pkwy, Suite 5\nColumbus, OH 43204', contact:'Dave Marek · owner', phone:'(614) 555-0142', email:'dave@acmeroofing.com' };
+  var detailFacts = [
+    { label:'Policy #', value:'BOP-4471902' }, { label:'Carrier', value:'The Hartford' },
+    { label:'NAICS', value:'238160 · Roofing Contractors' }, { label:'Term', value:'Aug 24, 2025 → Aug 24, 2026' },
+    { label:'Premium', value:'$8,420 (prior $7,980)' }, { label:'Renews', value:'Jul 24, 2026 (1 day)' },
+    { label:'Producer', value:'Gretchen' }, { label:'Bill type', value:'Agency bill · annual' },
+  ];
+  var detailCoverages = [
+    { name:'General Liability', limit:'$1M / $2M aggregate', ded:'$1,000' },
+    { name:'Property (BPP)', limit:'$250,000', ded:'$2,500' },
+    { name:'Business Income', limit:'$100,000', ded:'72 hr' },
+    { name:'Hired/Non-Owned Auto', limit:'$1,000,000', ded:'—' },
+  ];
+  var detailTimeline = [
+    { when:'Jul 22', text:'Renewal flagged at risk — no quote on file', color:'#B4231F' },
+    { when:'Jul 15', text:'Renewal questionnaire emailed to insured', color:'#B9822A' },
+    { when:'Jun 30', text:'Loss runs received from The Hartford', color:'#2F6B4F' },
+    { when:"Aug 24 '25", text:'Policy bound — 12-month term', color:'#6B7078' },
+  ];
+
+  // Cases
+  var tcKpis = [
+    { label:'Open cases', value:'14', sub:'agency service work', color:'#1B1D22' },
+    { label:'Overdue', value:'3', sub:'past target date', color:'#B4231F' },
+    { label:'Open tasks', value:'18', sub:'case-linked', color:'#1B1D22' },
+    { label:'Avg age', value:'6d', sub:'open cases', color:'#2F6B4F' },
+  ];
+  var cCat = { 'Endorsement':['#2563EB','#E9EFFC'],'Claim':['#B4231F','#FBE9E7'],'Service':['#2F6B4F','#EAF1EC'],'COI':['#B9822A','#F7EEDB'],'Billing':['#6D28D9','#EDE7FB'] };
+  var caseRows = [
+    { subj:'Add insured — Riverside GC', client:'Acme Roofing', cat:'COI', tasks:'2 open', age:'1d', status:'In progress', owner:'Gretchen' },
+    { subj:'Auto glass claim intake', client:'Miller Landscaping', cat:'Claim', tasks:'4 open', age:'2d', status:'Waiting', owner:'Lamar' },
+    { subj:'Add scheduled equipment', client:'Coastal HVAC', cat:'Endorsement', tasks:'1 open', age:'3d', status:'In progress', owner:'Lamar' },
+    { subj:'Update mailing address', client:'Summit Electric', cat:'Service', tasks:'1 open', age:'4d', status:'In progress', owner:'Gretchen' },
+    { subj:'Invoice dispute — installment', client:'Harbor Freight Co', cat:'Billing', tasks:'2 open', age:'8d', status:'Overdue', owner:'Lamar' },
+    { subj:'COI for new job site', client:'Vertex Contracting', cat:'COI', tasks:'1 open', age:'9d', status:'Overdue', owner:'Gretchen' },
+    { subj:'Water damage claim', client:'Delta Plumbing', cat:'Claim', tasks:'5 open', age:'11d', status:'Overdue', owner:'Lamar' },
+  ];
+  var dcase = { subj:'Water damage claim', client:'Delta Plumbing', cat:'Claim', catColor:'#B4231F', catBg:'#FBE9E7', status:'Overdue', owner:'Lamar', opened:'Jul 12, 2026', loss:'Burst supply line flooded finished basement office; water mitigation underway.' };
+  var caseFacts = [
+    { label:'Claim #', value:'CLM-88213' }, { label:'Carrier', value:'Travelers' }, { label:'Policy', value:'BOP-3320117' },
+    { label:'Adjuster', value:'R. Okafor · (866) 555-0190' }, { label:'Opened', value:'Jul 12, 2026' }, { label:'Target', value:'Jul 18, 2026 (overdue 5d)' },
+  ];
+  var caseTasks = [
+    { text:'Submit ACORD loss notice to Travelers', who:'Lamar', due:'Done Jul 12', done:true },
+    { text:'Upload water-mitigation invoice', who:'Lamar', due:'Overdue', done:false },
+    { text:'Collect photos from insured', who:'Gretchen', due:'Today', done:false },
+    { text:'Confirm adjuster site visit', who:'Lamar', due:'Jul 24', done:false },
+    { text:'Log reserve estimate in AMS', who:'Lamar', due:'Jul 25', done:false },
+  ];
+  var caseTimeline = [
+    { when:'Jul 22', text:'Case flagged overdue — mitigation invoice not filed', color:'#B4231F' },
+    { when:'Jul 16', text:'Adjuster R. Okafor assigned by Travelers', color:'#2563EB' },
+    { when:'Jul 13', text:'Emergency water mitigation dispatched', color:'#B9822A' },
+    { when:'Jul 12', text:'Claim opened from insured phone report', color:'#6B7078' },
+  ];
+
+  // Finance
+  var finKpis = [
+    { label:'Commission owed', value:'$6,566', sub:'expected not received', color:'#B9822A' },
+    { label:'Received MTD', value:'$18,240', sub:'across 6 carriers', color:'#2F6B4F' },
+    { label:'Variances', value:'7', sub:'expected ≠ received', color:'#B4231F' },
+    { label:'Chargebacks', value:'0', sub:'this month', color:'#1B1D22' },
+  ];
+  var vStat = { 'Short':['#B4231F','#FBE9E7'],'Received':['#2F6B4F','#EAF1EC'],'Pending':['#B9822A','#F7EEDB'] };
+  var finRows = [
+    { carrier:'The Hartford', policy:'BOP-4471902', client:'Acme Roofing', expected:'$1,263', received:'$0', status:'Pending' },
+    { carrier:'Travelers', policy:'WC-5510043', client:'Coastal HVAC', expected:'$3,345', received:'$1,900', status:'Short' },
+    { carrier:'Nationwide', policy:'CA-2231888', client:'Miller Landscaping', expected:'$1,815', received:'$1,815', status:'Received' },
+    { carrier:'Liberty Mutual', policy:'GL-7788201', client:'Summit Electric', expected:'$1,012', received:'$0', status:'Short' },
+    { carrier:'Chubb', policy:'UMB-3390021', client:'Vertex Contracting', expected:'$735', received:'$735', status:'Received' },
+    { carrier:'Progressive', policy:'CA-8890123', client:'Delta Plumbing', expected:'$946', received:'$531', status:'Short' },
+  ];
+
+  var headers = {
+    home:{ title:'Home', sub:'Risk Solutions Group · agency command center' },
+    crm:{ title:'CRM', sub:'Client book — accounts, policies, cases', action:'Open in new tab ↗' },
+    renewals:{ title:'Renewals', sub:'Retention & renewal worklist — quote-to-confirm', action:'Open in new tab ↗' },
+    cases:{ title:'Tasks & Cases', sub:'Agency service work — endorsements, claims, COIs, billing', action:'New case +' },
+    finance:{ title:'Finance', sub:'Commission reconciliation — expected vs received', action:'Import statement +' },
+    carrier:{ title:'Carrier Hub', sub:'Appetite, appointments & submissions' },
+    intake:{ title:'Intake', sub:'Evidence in, assessed & verified out' },
+    storage:{ title:'Storage', sub:'NextCloud files & shared documents' },
+    team:{ title:'Team Chat', sub:'Chat, questions & document sharing' },
+    sops:{ title:'SOPs', sub:'Standard operating procedures & playbooks' },
+  };
+
+  var stubPlanned = {
+    carrier:['Carrier appetite search by class & state','Appointment status and login vault','Submission tracking with round-trip status'],
+    intake:['Evidence upload with OCR extraction','Automated assessment & verification','Locked write-back to CRM on approval'],
+    storage:['NextCloud file browser embedded here','Per-client document folders','Drag-and-drop with version history'],
+    team:['Channels for renewals, service & carriers','Threaded questions with @mentions','Share documents straight from Storage'],
+    sops:['Searchable playbooks by workflow','Step-by-step checklists','Version history and owners'],
+  };
+  var stubKeys = ['intake','sops'];
+
+  var aiCfg = {
+    home:{ label:'Ask Hermes', scope:'All desks', accent:'#16233F', iconBg:'#E7EAF0', chipBorder:'#d5dae6', fabBg:'#16233F', fabGlyph:'#E0A82E', q:'Which renewals are at risk this week?', aTag:'Hermes', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'12 renewals are at risk, $6,566 in commission is short across 4 carriers, and 3 cases are overdue. Acme Roofing is the most urgent — it lapses tomorrow.', chips:['At-risk renewals','Money to chase','Overdue cases'], placeholder:'Ask Hermes anything across the agency…' },
+    crm:{ label:'Ask CRM Desk', scope:'CRM data only', accent:'#2F6B4F', iconBg:'#EAF1EC', chipBorder:'#d6e6db', fabBg:'#12271C', fabGlyph:'#8FE3B0', q:'Summarize Acme Roofing for me.', aTag:'Hermes · CRM', aBg:'#12271C', aColor:'#EAF3EC', aAccent:'#7FA98D', a:'Acme Roofing LLC — 3 active policies, $18,400 annual premium, 1 open COI case, and a renewal due tomorrow. No open claims. Producer is Gretchen.', chips:['Summarize a client','Open cases by age','Policies expiring'], placeholder:'Ask about clients, policies, cases…' },
+    renewals:{ label:'Ask Renewals Desk', scope:'Renewals only', accent:'#C2410C', iconBg:'#F7EAE1', chipBorder:'#f0d8c9', fabBg:'#C2410C', fabGlyph:'#FFE1D0', q:"What's slipping this week and what first?", aTag:'Hermes · Renewals', aBg:'#3A1B0E', aColor:'#FAEDE5', aAccent:'#E9A57F', a:'Acme Roofing renews in 1 day with no quote — call first. Vertex Contracting (9 days) is also at risk. Coastal HVAC is quoted and just needs a sign-off.', chips:['At-risk this week','Retention by carrier'], placeholder:'Ask about renewals, retention, owners…' },
+    cases:{ label:'Ask Cases Desk', scope:'Cases & tasks only', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', q:"What's overdue and who's holding it up?", aTag:'Hermes · Cases', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'3 cases are overdue: Harbor Freight billing (8d, Lamar), Vertex COI (9d, Gretchen), and Delta water-damage claim (11d, Lamar) — the claim has 5 open tasks, the biggest bottleneck.', chips:['Overdue by owner','Draft a COI'], placeholder:'Ask about cases, tasks, owners…' },
+    finance:{ label:'Ask Finance Desk', scope:'Finance data only', accent:'#B9822A', iconBg:'#F7EEDB', chipBorder:'#eaddbc', fabBg:'#16233F', fabGlyph:'#E0A82E', q:"Where's the $6,566 and who do I chase?", aTag:'Hermes · Finance', aBg:'#3A2A0E', aColor:'#F7EEDD', aAccent:'#E0B85F', a:"3 carriers are short: Travelers ($1,445 on Coastal HVAC WC), Liberty Mutual ($1,012 unpaid), Progressive ($415 on Delta). The Hartford's $1,263 is pending.", chips:['Shorts by carrier','Reconcile last month'], placeholder:'Ask about commissions, statements…' },
+    carrier:{ label:'Ask Carrier Desk', scope:'Carriers & appetite', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', q:'Who can write a roofing GL in Ohio?', aTag:'Hermes · Carrier', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'You have 123 appointed markets. Filter the directory by line or appetite, or open the full Carrier Hub for the appetite grid, worksheets, and logins.', chips:['Who can write this?','Appointments by line'], placeholder:'Ask about carriers, appetite, contacts…' },
+  };
+  function stubAi(m){ return { label:'Ask '+m.name+' Desk', scope:m.name+' only', accent:m.accent, iconBg:m.tint, chipBorder:'rgba(0,0,0,.08)', fabBg:'#16233F', fabGlyph:'#E0A82E', q:'What can you do here?', aTag:'Hermes · '+m.name, aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:"This workspace isn't wired to live data yet. Once "+m.name+" is connected, I'll answer using only its records.", chips:['Learn more'], placeholder:'Ask about '+m.name.toLowerCase()+'…' }; }
+
+  // ------------------------------------------------------------------
+  // Helpers
+  // ------------------------------------------------------------------
+  function h(strings){ return strings; } // no-op tag marker; we build plain strings
+  function attr(v){ return String(v).replace(/"/g,'&quot;'); }
+  function pill(on){ return 'flex:1;text-align:center;font-size:12px;font-weight:600;padding:6px 0;border-radius:7px;cursor:pointer;transition:all .12s ease;'+(on?'background:#fff;color:#16233F;box-shadow:0 1px 2px rgba(0,0,0,.10)':'background:transparent;color:#8A8E96'); }
+
+  // ------------------------------------------------------------------
+  // Screen renderers
+  // ------------------------------------------------------------------
+  function renderRail(screen){
+    var homeOn = screen === 'home';
+    var homeActiveBg = homeOn ? '#16233F' : '#FFFFFF';
+    var homeActiveFg = homeOn ? '#FFFFFF' : '#2B2E34';
+    var homeBorder   = homeOn ? '#16233F' : '#E9E3D4';
+    var homeDot      = homeOn ? '#E0A82E' : '#16233F';
+
+    var items = reg.map(function(m){
+      var on = screen === m.key;
+      var activeBg = on ? '#16233F' : '#FFFFFF';
+      var activeFg = on ? '#FFFFFF' : '#2B2E34';
+      var border   = on ? '#16233F' : '#E9E3D4';
+      var dot      = on ? '#E0A82E' : m.accent;
+      return '<div class="railitem" data-go="'+m.key+'" style="display:flex;align-items:center;gap:10px;flex:none;cursor:pointer;padding:9px 11px;border-radius:10px;border:1px solid '+border+';background:'+activeBg+'">'
+        + '<span style="width:8px;height:8px;border-radius:3px;flex:none;background:'+dot+'"></span>'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;line-height:1.05;color:'+activeFg+'">'+m.railLabel+'</span>'
+      + '</div>';
+    }).join('');
+
+    return '<div style="width:172px;flex:none;background:#F7F4EC;border-right:1px solid #E7E2D5;display:flex;flex-direction:column;padding:14px 12px 12px;gap:6px;overflow:auto">'
+      + '<div style="display:flex;align-items:center;gap:10px;padding:2px 4px 12px;margin-bottom:2px;border-bottom:1px solid #E7E2D5">'
+        + '<div style="width:40px;height:40px;border-radius:11px;background:#16233F;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:none">'
+          + '<span style="font-family:\'Newsreader\',Georgia,serif;color:#fff;font-size:19px;font-weight:600;line-height:1">R</span>'
+          + '<span style="width:15px;height:2px;background:#E0A82E;margin-top:3px;border-radius:2px"></span>'
+        + '</div>'
+        + '<div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#16233F;line-height:1">RSG</div><div style="font-size:8.5px;letter-spacing:.1em;color:#9A9384;font-weight:700;margin-top:2px">AGENCY PORTAL</div></div>'
+      + '</div>'
+      + '<div class="railitem" data-go="home" style="display:flex;align-items:center;gap:10px;flex:none;cursor:pointer;padding:9px 11px;border-radius:10px;border:1px solid '+homeBorder+';background:'+homeActiveBg+'">'
+        + '<span style="width:8px;height:8px;border-radius:3px;flex:none;background:'+homeDot+'"></span>'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;line-height:1;color:'+homeActiveFg+'">Home</span>'
+      + '</div>'
+      + items
+      + '<div style="margin-top:auto;flex:none;display:flex;align-items:center;gap:9px;padding:10px 11px 2px;border-top:1px solid #E7E2D5;color:#9A9AA0"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.5 6.5 0 0 0 9.8 9.8z"></path></svg><span style="font-size:12px;color:#9A9384;font-weight:500">Night mode</span></div>'
+    + '</div>';
+  }
+
+  function renderHeader(screen, person){
+    var header = headers[screen] || headers.home;
+    var isHome = screen === 'home';
+    var live = anyLive();
+    var badgeC = live ? '#2F6B4F' : '#B9822A', badgeBg = live ? '#EAF1EC' : '#F7EEDB', badgeBd = live ? '#d6e6db' : '#eaddbc', badgeTxt = live ? 'Live data' : 'Sample data';
+    var liveBadge = isHome ? '<span title="'+(live?'At least one workspace is showing live Hermes data':'Backend unreachable — showing sample data')+'" style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:'+badgeC+';font-weight:600;background:'+badgeBg+';border:1px solid '+badgeBd+';border-radius:999px;padding:4px 10px"><span style="width:7px;height:7px;border-radius:50%;background:'+badgeC+';display:inline-block"></span>'+badgeTxt+'</span>' : '';
+    var actionChip = header.action ? '<span style="display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#3D4149;background:#fff;border:1px solid #E2E1DC;border-radius:8px;padding:6px 12px;font-weight:500">'+header.action+'</span>' : '';
+    return '<div style="height:66px;flex:none;background:#FBF9F4;border-bottom:1px solid #ECEAE2;display:flex;align-items:center;justify-content:space-between;padding:0 26px">'
+      + '<div>'
+        + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:22px;color:#1B1D22;line-height:1.1">'+header.title+'</div>'
+        + '<div style="font-size:12px;color:#7A7E86;margin-top:1px">'+header.sub+'</div>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:12px">'
+        + liveBadge + actionChip
+        + '<div style="width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:600;background:'+person.accent+'">'+person.initial+'</div>'
+      + '</div>'
+    + '</div>';
+  }
+
+  function renderHome(person){
+    var kpis = homeKpis.map(function(k){
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:12px;padding:14px 15px">'
+        + '<div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#8A8E96;font-weight:700">'+k.label+'</div>'
+        + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:5px;line-height:1">'+k.value+'</div>'
+        + '<div style="font-size:11.5px;color:#8A8E96;margin-top:5px">'+k.sub+'</div>'
+      + '</div>';
+    }).join('');
+
+    var modules = reg.map(function(m){
+      return '<div class="tile" data-go="'+m.key+'" style="min-width:0;background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:14px 15px;cursor:pointer">'
+        + '<div style="display:flex;align-items:center;gap:11px">'
+          + '<div style="width:38px;height:38px;flex:none;border-radius:11px;display:flex;align-items:center;justify-content:center;background:'+m.tint+'"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;font-weight:600;color:'+m.accent+'">'+m.mono+'</span></div>'
+          + '<div style="min-width:0">'
+            + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:16px;color:#1B1D22;line-height:1.1">'+m.name+'</div>'
+            + '<div style="font-size:11.5px;color:#868A92;margin-top:2px;line-height:1.3">'+m.desc+'</div>'
+          + '</div>'
+        + '</div>'
+        + '<div style="display:flex;align-items:center;gap:7px;margin-top:11px;padding-top:10px;border-top:1px solid #F0F0EC">'
+          + '<span style="width:6px;height:6px;border-radius:50%;display:inline-block;background:'+m.accent+'"></span>'
+          + '<span style="font-size:12px;color:#3D4149;font-weight:600">'+m.stat+'</span>'
+          + '<span style="font-size:12px;color:#A8ABB1">· '+m.stat2+'</span>'
+        + '</div>'
+      + '</div>';
+    }).join('');
+
+    var u = state.user;
+    var tasks = tasksByUser[u].map(function(t,i){
+      var key = u+':'+i, checked = !!state.done[key];
+      var boxStyle = 'width:17px;height:17px;border-radius:5px;flex:none;margin-top:2px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:10px;color:#fff;font-weight:700;transition:all .12s ease;'+(checked?('background:'+t.color+';border:1px solid '+t.color):'background:#fff;border:1.5px solid #D3D5DA');
+      var textStyle = 'font-size:13px;line-height:1.35;'+(checked?'color:#B0B3B9;text-decoration:line-through':'color:#25282E');
+      return '<div style="display:flex;gap:11px;padding:12px 0;border-top:1px solid #F1F1ED">'
+        + '<div data-toggle="'+key+'" style="'+boxStyle+'">'+(checked?'✓':'')+'</div>'
+        + '<div style="min-width:0;flex:1">'
+          + '<div style="'+textStyle+'">'+t.text+'</div>'
+          + '<div style="display:flex;align-items:center;gap:8px;margin-top:4px">'
+            + '<span style="font-size:10.5px;color:#A2A5AC;text-transform:uppercase;letter-spacing:.06em;font-weight:700">'+t.tag+'</span>'
+            + '<span style="font-size:10.5px;color:#B9822A;font-weight:600">'+t.due+'</span>'
+          + '</div>'
+        + '</div>'
+      + '</div>';
+    }).join('');
+
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:#1B1D22;margin:0 0 3px;font-weight:500">Good morning, '+person.name+'.</h1>'
+      + '<p style="font-size:14px;color:#6B7078;margin:0 0 18px">Your desks and your list, in one place.</p>'
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px">'+kpis+'</div>'
+      + '<div style="display:flex;gap:22px;align-items:flex-start">'
+        + '<div style="flex:1 1 0;min-width:0">'
+          + '<div style="font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:#2563EB;font-weight:700;margin-bottom:12px">Workspaces</div>'
+          + '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px">'+modules+'</div>'
+        + '</div>'
+        + '<div style="width:320px;flex:none;background:#fff;border:1px solid #E7E7E4;border-radius:16px;padding:18px 19px">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between">'
+            + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:19px;color:#1B1D22">My tasks</span>'
+            + '<span style="font-size:11px;color:#91959C">'+person.name+'</span>'
+          + '</div>'
+          + '<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#A2A5AC;margin:4px 0 13px"><svg width="12" height="12" viewBox="0 0 24 24" fill="#0082C9"><circle cx="12" cy="12" r="11"></circle></svg>via NextCloud Tasks</div>'
+          + '<div style="display:flex;gap:4px;background:#F1F1ED;border-radius:9px;padding:3px;margin-bottom:6px">'
+            + '<div data-user="lamar" style="'+pill(u==='lamar')+'">Lamar</div>'
+            + '<div data-user="gretchen" style="'+pill(u==='gretchen')+'">Gretchen</div>'
+          + '</div>'
+          + '<div style="display:flex;flex-direction:column">'+tasks+'</div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  }
+
+  function renderCRM(){
+    var nav = crmNavRaw.map(function(n){
+      var color = n.active?'#FFFFFF':'#9FBBA8', bg = n.active?'rgba(255,255,255,.10)':'transparent', weight = n.active?600:500;
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer;color:'+color+';background:'+bg+';font-size:13px;font-weight:'+weight+'"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="'+n.d+'"></path></svg><span>'+n.label+'</span></div>';
+    }).join('');
+
+    var kpis = crmKpis.map(function(k){
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:13px 15px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:25px;color:#1B1D22;margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
+    }).join('');
+
+    var cards = crmCardsRaw.map(function(c){
+      var openLabel = c.to==='finance'?'Reconcile in Finance ↗':(c.to?'Open '+c.name+' ↗':'Open →');
+      var openColor = c.to==='finance'?'#16233F':'#2F6B4F';
+      var go = c.to ? ' data-go="'+c.to+'"' : '';
+      return '<div class="tile"'+go+' style="background:#fff;border:1px solid #E7E7E4;border-radius:12px;padding:16px 17px;cursor:pointer"><div style="display:flex;align-items:baseline;justify-content:space-between"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:19px;color:#1B1D22">'+c.name+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;color:#2F6B4F;background:#EAF1EC">'+c.count+'</span></div><div style="font-size:12px;color:#868A92;margin:6px 0 14px">'+c.desc+'</div><div style="font-size:12.5px;font-weight:600;color:'+openColor+'">'+openLabel+'</div></div>';
+    }).join('');
+
+    return '<div style="position:absolute;inset:0;display:flex;min-height:0">'
+      + '<div style="width:196px;flex:none;background:#12271C;display:flex;flex-direction:column;padding:18px 12px;overflow:auto">'
+        + '<div style="padding:0 8px 14px"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:21px;color:#fff;line-height:1">RSG</div><div style="font-size:9px;letter-spacing:.16em;color:#7FA98D;font-weight:700;margin-top:3px">AGENCY CRM</div></div>'
+        + '<div style="display:flex;flex-direction:column;gap:1px">'+nav+'</div>'
+        + '<div style="margin-top:auto;display:flex;align-items:center;gap:8px;padding:10px 9px 0;border-top:1px solid rgba(255,255,255,.08)"><span style="width:7px;height:7px;border-radius:50%;background:#3DDC84;display:inline-block"></span><div><div style="font-size:11px;color:#CFE3D6;font-weight:600">Supabase connected</div><div style="font-size:9.5px;color:#6E9179">Hermes mirrors · live</div></div></div>'
+      + '</div>'
+      + '<div style="flex:1;min-width:0;overflow:auto;padding:24px 26px">'
+        + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live Supabase model</div>'
+        + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Agency workspace</h1>'
+        + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Clients and Policies are read-only mirrors; Pipeline, Cases, and Tasks write back to Supabase. Renewals and Commissions have their own workspaces.</p>'
+        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">'+kpis+'</div>'
+        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding-bottom:20px">'+cards+'</div>'
+      + '</div>'
+    + '</div>';
+  }
+
+  function renderRenewals(){
+    var kpis = renewalKpis.map(function(k){
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
+    }).join('');
+
+    var rows = renewalRows.map(function(r,i){
+      // Live rows carry their own status colors; sample rows look them up.
+      var sc = r.statusColor || (rStat[r.status]||['#6B7078','#EFEFEC'])[0];
+      var sb = r.statusBg || (rStat[r.status]||['#6B7078','#EFEFEC'])[1];
+      return '<div class="tile rowh" data-detail="open" data-idx="'+i+'" style="display:grid;grid-template-columns:1.6fr 1.2fr .9fr .9fr 1fr .9fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+r.client+'</span><span style="font-size:12.5px;color:#6B7078">'+r.line+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.premium+'</span><span style="font-size:12.5px;color:#3D4149">'+r.days+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+sc+';background:'+sb+'">'+r.status+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
+    }).join('');
+
+    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+      + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#C2410C;font-weight:700">Retention workstation</div>'
+      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Keep the book on the books.</h1>'
+      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Every policy inside its renewal window, ranked by risk. Fed from CRM policy mirrors; owners and status write back to Supabase.</p>'
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px">'
+        + '<div style="display:flex;gap:7px">'
+          + '<span style="font-size:12px;font-weight:600;color:#fff;background:#C2410C;border-radius:999px;padding:5px 13px;cursor:pointer">All · 38</span>'
+          + '<span style="font-size:12px;font-weight:600;color:#B4231F;background:#FBE9E7;border-radius:999px;padding:5px 13px;cursor:pointer">At risk · 12</span>'
+          + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">This week · 5</span>'
+          + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">Mine · 16</span>'
+        + '</div>'
+        + '<span style="font-size:12px;color:#96999F">Sorted by soonest</span>'
+      + '</div>'
+      + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
+        + '<div style="display:grid;grid-template-columns:1.6fr 1.2fr .9fr .9fr 1fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Renews in</span><span>Status</span><span>Owner</span></div>'
+        + rows
+      + '</div>'
+    + '</div>';
+
+    var detailOn = state.detail;
+    var ovBase = 'position:absolute;inset:0;z-index:6;background:#F3F4F6;overflow:auto;transition:transform .34s cubic-bezier(.4,0,.2,1),opacity .3s ease;';
+    var detailStyle = ovBase + (detailOn?'transform:translateX(0);opacity:1;pointer-events:auto':'transform:translateX(4%);opacity:0;pointer-events:none');
+
+    // Detail header/insured view: live selection overrides the sample "acme".
+    var live = selRenewal;
+    var dv = live ? {
+      client: live.client_name || '—',
+      line: 'Policy '+(live.policy_number||'—'),
+      status: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[0],
+      statusColor: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[1],
+      statusBg: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[2],
+      renews: (live.expiration_date||'—')+(live.days_until!=null?' ('+live.days_until+'d)':''),
+      contact:'—', phone:'', email:'',
+      address:'Insured detail loads from NowCerts on demand.',
+      note: live.ai_strategy_notes || 'No strategy note on file.'
+    } : acme;
+
+    var facts;
+    if(live){
+      var lf = [
+        { label:'Policy #', value:live.policy_number||'—' },
+        { label:'Risk', value:(renewalStatusMap[live.risk_status]||['—'])[0] },
+        { label:'Premium (current)', value:money(live.premium_current) },
+        { label:'Premium (renewal)', value:live.premium_renewal!=null?money(live.premium_renewal):'—' },
+        { label:'Expiration', value:live.expiration_date||'—' },
+        { label:'Renews in', value:live.days_until!=null?(live.days_until+' days'):'—' },
+        { label:'Change', value:live.increase_percentage!=null?((live.increase_percentage>0?'+':'')+live.increase_percentage+'%'):'—' },
+        { label:'Last contact', value:live.last_contact_date||'—' },
+      ];
+      facts = lf.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
+    } else {
+      facts = detailFacts.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
+    }
+
+    var covsCard = live
+      ? '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Coverages &amp; activity</span><div style="font-size:13px;color:#6B7078;margin-top:10px;line-height:1.5">Coverage schedule and the full activity timeline load from NowCerts (AMS) on demand — this list view is served live from the Renewals Cockpit.</div></div>'
+      : ('<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+          + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Coverages</span>'
+          + '<div style="margin-top:12px;border:1px solid #EFEFEB;border-radius:10px;overflow:hidden"><div style="display:grid;grid-template-columns:1.6fr 1.2fr .7fr;gap:12px;padding:9px 15px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Coverage</span><span>Limit</span><span>Deductible</span></div>'
+          + detailCoverages.map(function(c){ return '<div style="display:grid;grid-template-columns:1.6fr 1.2fr .7fr;gap:12px;padding:11px 15px;border-bottom:1px solid #F2F2EE;font-size:13px;color:#25282E"><span style="font-weight:500">'+c.name+'</span><span style="color:#6B7078">'+c.limit+'</span><span style="color:#6B7078">'+c.ded+'</span></div>'; }).join('')
+          + '</div></div>'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+          + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Activity</span>'
+          + '<div style="margin-top:12px;display:flex;flex-direction:column">'
+          + detailTimeline.map(function(t){ return '<div style="display:flex;gap:12px;padding:9px 0;border-top:1px solid #F2F2EE"><span style="width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none;background:'+t.color+'"></span><div style="flex:1"><div style="font-size:13px;color:#25282E;line-height:1.4">'+t.text+'</div></div><span style="font-size:11.5px;color:#A2A5AC;white-space:nowrap">'+t.when+'</span></div>'; }).join('')
+          + '</div></div>');
+
+    var detail = '<div style="'+detailStyle+'">'
+      + '<div style="position:sticky;top:0;background:#FBF9F4;border-bottom:1px solid #ECEAE2;padding:14px 26px;display:flex;align-items:center;gap:14px;z-index:2">'
+        + '<div data-detail="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Renewals</div>'
+        + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
+        + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+dv.client+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+dv.statusColor+';background:'+dv.statusBg+'">'+dv.status+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+dv.line+' · renews '+dv.renews+'</div></div>'
+        + '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#C2410C;background:#F7EAE1;border:1px solid #f0d8c9;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Start renewal</span>'
+        + '<span style="display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:#3D4149;background:#fff;border:1px solid #E2E1DC;border-radius:8px;padding:6px 12px;font-weight:500;cursor:pointer">Open in AMS ↗</span>'
+      + '</div>'
+      + '<div style="padding:24px 26px 40px;display:flex;gap:20px;align-items:flex-start;max-width:1000px">'
+        + '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:16px">'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Policy details</span><span style="font-size:10.5px;color:#96999F;display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:'+(live?'#3DDC84':'#B9822A')+'"></span>'+(live?'Live · Renewals Cockpit':'Sample data')+'</span></div>'
+            + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px">'+facts+'</div>'
+          + '</div>'
+          + covsCard
+        + '</div>'
+        + '<div style="width:280px;flex:none;display:flex;flex-direction:column;gap:16px">'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Insured</span><div style="font-size:13.5px;color:#25282E;margin-top:10px;white-space:pre-line;line-height:1.5">'+dv.address+'</div>'+(dv.contact&&dv.contact!=='—'?'<div style="height:1px;background:#F0F0EC;margin:13px 0"></div><div style="font-size:13px;color:#25282E;font-weight:500">'+dv.contact+'</div><div style="font-size:12.5px;color:#6B7078;margin-top:4px">'+dv.phone+'</div><div style="font-size:12.5px;color:#2563EB;margin-top:2px">'+dv.email+'</div>':'')+'</div>'
+          + '<div style="background:#3A1B0E;border-radius:13px;padding:16px 18px;color:#FAEDE5"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#E9A57F;font-weight:700;margin-bottom:8px">Hermes · Renewals</div><div style="font-size:13px;line-height:1.5">'+(live?dv.note:('No quote on file and 1 day to expiry — highest priority. Prior term was '+acme.priorPremium+'; loss runs are clean. Recommend calling '+acme.contact+' today.'))+'</div></div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+
+    return list + detail;
+  }
+
+  function renderCases(){
+    var kpis = tcKpis.map(function(k){
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
+    }).join('');
+
+    var rows = caseRows.map(function(r){
+      // Live rows carry their own colors; sample rows look them up by category key.
+      var cc = r.catColor || (cCat[r.cat]||['#2F6B4F','#EAF1EC'])[0];
+      var cb = r.catBg || (cCat[r.cat]||['#2F6B4F','#EAF1EC'])[1];
+      var o = (''+r.status).toLowerCase()==='overdue';
+      var statusColor = r.statusColor || (o?'#B4231F':'#3D4149'), statusWeight = r.statusWeight || (o?700:500);
+      return '<div class="tile rowh" data-casedetail="open" style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.subj+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+cc+';background:'+cb+'">'+r.cat+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.tasks+'</span><span style="font-size:12.5px;color:#6B7078">'+r.age+'</span><span style="font-size:12.5px;font-weight:'+statusWeight+';color:'+statusColor+'">'+r.status+'</span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
+    }).join('');
+
+    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+      + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#2563EB;font-weight:700">Service workstation</div>'
+      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Everything the book needs done.</h1>'
+      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Cases group the work; tasks are the steps inside them. Both write back to Supabase and link to the client in CRM.</p>'
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
+      + '<div style="display:flex;gap:7px;margin-bottom:11px">'
+        + '<span style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:999px;padding:5px 13px;cursor:pointer">All · 14</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#B4231F;background:#FBE9E7;border-radius:999px;padding:5px 13px;cursor:pointer">Overdue · 3</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">Waiting · 1</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">Mine · 6</span>'
+      + '</div>'
+      + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
+        + '<div style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Case</span><span>Client</span><span>Type</span><span>Tasks</span><span>Age</span><span>Status</span><span>Owner</span></div>'
+        + rows
+      + '</div>'
+    + '</div>';
+
+    var detailOn = state.caseDetail;
+    var ovBase = 'position:absolute;inset:0;z-index:6;background:#F3F4F6;overflow:auto;transition:transform .34s cubic-bezier(.4,0,.2,1),opacity .3s ease;';
+    var caseDetailStyle = ovBase + (detailOn?'transform:translateX(0);opacity:1;pointer-events:auto':'transform:translateX(4%);opacity:0;pointer-events:none');
+
+    var facts = caseFacts.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
+    var tasks = caseTasks.map(function(t){
+      var box = 'width:16px;height:16px;border-radius:5px;flex:none;margin-top:1px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#fff;font-weight:700;'+(t.done?'background:#2F6B4F;border:1px solid #2F6B4F':'background:#fff;border:1.5px solid #D3D5DA');
+      var txt = 'font-size:13px;line-height:1.4;'+(t.done?'color:#B0B3B9;text-decoration:line-through':'color:#25282E');
+      var dueColor = t.due==='Overdue'?'#B4231F':'#A2A5AC';
+      return '<div style="display:flex;gap:11px;padding:11px 0;border-top:1px solid #F2F2EE;align-items:flex-start"><div style="'+box+'">'+(t.done?'✓':'')+'</div><div style="flex:1;min-width:0"><div style="'+txt+'">'+t.text+'</div></div><span style="font-size:11.5px;color:#6B7078;white-space:nowrap">'+t.who+'</span><span style="font-size:11.5px;font-weight:600;white-space:nowrap;color:'+dueColor+'">'+t.due+'</span></div>';
+    }).join('');
+    var tl = caseTimeline.map(function(t){ return '<div style="display:flex;gap:12px;padding:9px 0;border-top:1px solid #F2F2EE"><span style="width:8px;height:8px;border-radius:50%;margin-top:5px;flex:none;background:'+t.color+'"></span><div style="flex:1"><div style="font-size:13px;color:#25282E;line-height:1.4">'+t.text+'</div></div><span style="font-size:11.5px;color:#A2A5AC;white-space:nowrap">'+t.when+'</span></div>'; }).join('');
+
+    var detail = '<div style="'+caseDetailStyle+'">'
+      + '<div style="position:sticky;top:0;background:#FBF9F4;border-bottom:1px solid #ECEAE2;padding:14px 26px;display:flex;align-items:center;gap:14px;z-index:2">'
+        + '<div data-casedetail="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Tasks &amp; Cases</div>'
+        + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
+        + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+dcase.subj+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+dcase.catColor+';background:'+dcase.catBg+'">'+dcase.cat+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:#B4231F;background:#FBE9E7">'+dcase.status+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+dcase.client+' · opened '+dcase.opened+' · '+dcase.owner+'</div></div>'
+        + '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#fff;background:#16233F;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Add task +</span>'
+        + '<span style="display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:#3D4149;background:#fff;border:1px solid #E2E1DC;border-radius:8px;padding:6px 12px;font-weight:500;cursor:pointer">Open in AMS ↗</span>'
+      + '</div>'
+      + '<div style="padding:24px 26px 40px;display:flex;gap:20px;align-items:flex-start;max-width:1000px">'
+        + '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:16px">'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Claim details</span><span style="font-size:10.5px;color:#96999F;display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#3DDC84"></span>Pulled from AMS · NowCerts</span></div>'
+            + '<div style="font-size:13px;color:#3D4149;line-height:1.55;margin-bottom:16px;padding:12px 14px;background:#FAFAF7;border-radius:9px;border:1px solid #EFEFEB">'+dcase.loss+'</div>'
+            + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px">'+facts+'</div>'
+          + '</div>'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+            + '<div style="display:flex;align-items:center;justify-content:space-between"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Tasks</span><span style="font-size:11.5px;color:#96999F">1 of 5 done</span></div>'
+            + '<div style="margin-top:12px;display:flex;flex-direction:column">'+tasks+'</div>'
+          + '</div>'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+            + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Activity</span>'
+            + '<div style="margin-top:12px;display:flex;flex-direction:column">'+tl+'</div>'
+          + '</div>'
+        + '</div>'
+        + '<div style="width:280px;flex:none;display:flex;flex-direction:column;gap:16px">'
+          + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Linked client</span><div style="font-size:14px;color:#25282E;margin-top:10px;font-weight:500">'+dcase.client+'</div><div data-go="crm" style="font-size:12.5px;color:#2563EB;margin-top:3px;cursor:pointer">Open in CRM ↗</div><div style="height:1px;background:#F0F0EC;margin:13px 0"></div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">Owner</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+dcase.owner+'</div></div>'
+          + '<div style="background:#16233F;border-radius:13px;padding:16px 18px;color:#E7EDF7"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#9FB0CB;font-weight:700;margin-bottom:8px">Hermes · Cases</div><div style="font-size:13px;line-height:1.5">This case is 5 days overdue with 4 tasks open. The blocker is the missing mitigation invoice — once uploaded, the adjuster can reserve.</div></div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+
+    return list + detail;
+  }
+
+  function renderFinance(){
+    if(state.financeEmbed){ return embedPane('Finance overview', COMMISSION_EMBED, 'data-finance', 'Full Commission Tracker · live'); }
+    var kpis = finKpis.map(function(k){
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
+    }).join('');
+    var rows = finRows.map(function(r){
+      var s = r.statusColor ? [r.statusColor, r.statusBg] : (vStat[r.status] || ['#6B7078','#EFEFEC']);
+      return '<div class="tile rowh" style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
+    }).join('');
+
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
+        + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#B9822A;font-weight:700">Money workstation</div>'
+          + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Chase what\'s owed.</h1>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Every carrier statement reconciled against expected commission from the CRM ledger. Variances surface here; open the full Commission Tracker to import statements and reconcile.</p></div>'
+        + '<div data-finance="embed" style="flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#fff;background:#B9822A;border-radius:9px;padding:9px 14px;font-weight:600;cursor:pointer">Open full Commission Tracker ↗</div>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
+      + '<div style="display:flex;gap:7px;margin-bottom:11px">'
+        + '<span style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:999px;padding:5px 13px;cursor:pointer">All · 6</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#B4231F;background:#FBE9E7;border-radius:999px;padding:5px 13px;cursor:pointer">Short · 3</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#B9822A;background:#F7EEDB;border-radius:999px;padding:5px 13px;cursor:pointer">Pending · 1</span>'
+        + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">This month</span>'
+      + '</div>'
+      + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
+        + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Carrier</span><span>Policy</span><span>Client</span><span>Expected</span><span>Received</span><span>Status</span></div>'
+        + rows
+      + '</div>'
+    + '</div>';
+  }
+
+  // ---- Carrier Hub (hybrid: native at-a-glance + embed of full carrierhub) ----
+  function lobText(c){ var l=c.lines_of_business; return Array.isArray(l)?l.join(' · '):(l?(''+l):'—'); }
+  function carrierStats(list){
+    var total=list.length;
+    var canWrite=list.filter(function(c){ return c.appetite_can_write && (''+c.appetite_can_write).trim(); }).length;
+    var active=list.filter(function(c){ return c.is_active; }).length;
+    var contacts=list.reduce(function(s,c){ return s+((c.carrier_contacts||[]).length); },0);
+    return { total:total, canWrite:canWrite, active:active, contacts:contacts };
+  }
+  function carrierRowsHtml(list){
+    if(!list.length) return '<div style="padding:22px 18px;color:#9A9EA6;font-size:13px">No carriers match that search.</div>';
+    return list.map(function(c){
+      var lob=lobText(c);
+      var login=c.agent_login?('<a href="'+c.agent_login+'" target="_blank" rel="noopener" style="font-size:12px;color:#2563EB;white-space:nowrap">Login ↗</a>'):'';
+      var ga=c.general_agent?('<span style="font-size:11.5px;color:#868A92">GA · '+c.general_agent+'</span>'):'';
+      var nc=(c.carrier_contacts||[]).length;
+      var contacts=nc?('<span style="font-size:11.5px;color:#868A92">'+nc+' contact'+(nc===1?'':'s')+'</span>'):'';
+      var canWrite=(c.appetite_can_write&&(''+c.appetite_can_write).trim())?('<span style="font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;color:#2F6B4F;background:#EAF1EC">can write</span>'):'';
+      return '<div class="rowh" style="display:grid;grid-template-columns:1.4fr 1.5fr auto;gap:14px;align-items:center;padding:12px 18px;border-bottom:1px solid #F2F2EE">'
+        + '<div style="min-width:0"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22;line-height:1.15">'+(c.name||'—')+'</div><div style="display:flex;align-items:center;gap:8px;margin-top:3px">'+(c.segment?'<span style="font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:#96999F;font-weight:700">'+c.segment+'</span>':'')+canWrite+'</div></div>'
+        + '<div style="min-width:0"><div style="font-size:12.5px;color:#3D4149;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+lob+'</div><div style="display:flex;gap:10px;margin-top:3px">'+ga+contacts+'</div></div>'
+        + '<div style="display:flex;align-items:center;gap:12px;justify-content:flex-end">'+(c.underwriting_hotline?'<span style="font-size:11.5px;color:#868A92;white-space:nowrap">'+c.underwriting_hotline+'</span>':'')+login+'</div>'
+      + '</div>';
+    }).join('');
+  }
+  function renderCarrier(){
+    if(state.carrierEmbed){
+      return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
+        + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
+          + '<div data-carrier="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Carrier overview</div>'
+          + '<div style="width:1px;height:18px;background:#E2E1DC"></div>'
+          + '<span style="font-size:11.5px;color:#96999F">Full Carrier Hub · live</span>'
+          + '<a href="'+CARRIERHUB_EMBED+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
+        + '</div>'
+        + '<iframe src="'+CARRIERHUB_EMBED+'" style="flex:1;width:100%;border:0" title="Carrier Hub"></iframe>'
+      + '</div>';
+    }
+    var loaded = !!carrierData, list = carrierData || [];
+    var s = loaded ? carrierStats(list) : { total:'—', canWrite:'—', active:'—', contacts:'—' };
+    var kpis = [
+      { label:'Carriers', value:s.total, sub:'in the network' },
+      { label:'Can write', value:s.canWrite, sub:'appetite on file' },
+      { label:'Appointments', value:s.active, sub:'active markets' },
+      { label:'Contacts', value:s.contacts, sub:'underwriters & reps' },
+    ].map(function(k){ return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:#1B1D22;margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>'; }).join('');
+    var body = loaded
+      ? ('<div style="display:flex;align-items:center;gap:12px;margin-bottom:11px">'
+          + '<div style="flex:1;display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #E6E6E2;border-radius:11px;padding:9px 13px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9A9EA6" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4-4"></path></svg><input id="carrierSearch" placeholder="Search carriers by name, line of business, or appetite…" style="flex:1;border:0;outline:none;font-size:13px;color:#25282E;background:transparent;font-family:inherit"></div>'
+          + '<span id="carrierCount" style="font-size:12px;color:#96999F;white-space:nowrap"></span>'
+        + '</div>'
+        + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden"><div id="carrierResults"></div></div>')
+      : '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:30px;text-align:center;color:#9A9EA6;font-size:13px">Loading carrier directory…</div>';
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+      + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
+        + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#2563EB;font-weight:700">Markets & appointments</div>'
+          + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Where the business goes.</h1>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:520px;line-height:1.5">Your appointed markets, who can write what, logins and contacts — at a glance. Open the full Carrier Hub for appetite search, worksheets, and the AI advisor.</p></div>'
+        + '<div data-carrier="embed" style="flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#fff;background:#2563EB;border-radius:9px;padding:9px 14px;font-weight:600;cursor:pointer">Open full Carrier Hub ↗</div>'
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
+      + body
+    + '</div>';
+  }
+  // Wire the carrier search box in place (no full re-render → input keeps focus).
+  function wireCarrier(){
+    var res=document.getElementById('carrierResults'); if(!res) return;
+    var inp=document.getElementById('carrierSearch');
+    var cnt=document.getElementById('carrierCount');
+    function apply(){
+      var q=((inp&&inp.value)||'').toLowerCase().trim();
+      var list=carrierData||[];
+      if(q) list=list.filter(function(c){ return ((c.name||'')+' '+lobText(c)+' '+(c.appetite_can_write||'')+' '+(c.general_agent||'')+' '+(c.segment||'')).toLowerCase().indexOf(q)>=0; });
+      if(cnt) cnt.textContent=list.length+' of '+(carrierData||[]).length;
+      res.innerHTML=carrierRowsHtml(list.slice(0,80));
+    }
+    if(inp) inp.oninput=apply;
+    apply();
+  }
+
+  function renderStub(screen){
+    var stubMod = reg.filter(function(m){ return m.key===screen; })[0] || reg[0];
+    var planned = (stubPlanned[screen]||[]).map(function(p){ return '<div style="display:flex;gap:10px;align-items:flex-start"><span style="width:6px;height:6px;border-radius:50%;margin-top:6px;flex:none;background:'+stubMod.accent+'"></span><span style="font-size:13.5px;color:#3D4149;line-height:1.45">'+p+'</span></div>'; }).join('');
+    return '<div style="position:absolute;inset:0;overflow:auto;display:flex;align-items:center;justify-content:center;padding:40px">'
+      + '<div style="max-width:480px;text-align:center">'
+        + '<div style="width:64px;height:64px;border-radius:16px;margin:0 auto 18px;display:flex;align-items:center;justify-content:center;background:'+stubMod.tint+'"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;font-weight:600;color:'+stubMod.accent+'">'+stubMod.mono+'</span></div>'
+        + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:0 0 8px;font-weight:500">'+stubMod.name+'</h1>'
+        + '<p style="font-size:14px;color:#6B7078;margin:0 0 22px;line-height:1.55">'+stubMod.desc+'</p>'
+        + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:14px;padding:22px 24px;text-align:left">'
+          + '<div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#96999F;font-weight:700;margin-bottom:12px">Planned for this workspace</div>'
+          + '<div style="display:flex;flex-direction:column;gap:10px">'+planned+'</div>'
+          + '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #F0F0EC;font-size:12.5px;color:#9A9EA6">Its scoped <b style="color:#3D4149;font-weight:600">Ask '+stubMod.name+' Desk</b> will connect once this workspace is wired.</div>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  }
+
+  function renderAI(screen){
+    var stubMod = reg.filter(function(m){ return m.key===screen; })[0] || reg[0];
+    var ai = aiCfg[screen] || stubAi(stubMod);
+    var aiOpen = state.aiOpen;
+
+    var panelBase = 'position:absolute;top:0;right:0;bottom:0;width:340px;background:#fff;border-left:1px solid #E7E7E4;box-shadow:-14px 0 40px rgba(20,25,40,.10);display:flex;flex-direction:column;z-index:5;transition:transform .32s cubic-bezier(.4,0,.2,1);';
+    var scrimBase = 'position:absolute;inset:0;background:rgba(18,23,40,.16);z-index:4;transition:opacity .3s ease;';
+    var fabBase = 'position:absolute;right:22px;bottom:22px;z-index:3;display:flex;align-items:center;gap:9px;color:#fff;border-radius:999px;padding:11px 17px;box-shadow:0 8px 22px rgba(18,39,28,.28);cursor:pointer;transition:opacity .25s ease,transform .25s ease;background:'+ai.fabBg+';';
+
+    var aiFabStyle = fabBase + (aiOpen?'opacity:0;pointer-events:none;transform:translateY(8px)':'opacity:1');
+    var aiPanelStyle = panelBase + (aiOpen?'transform:translateX(0)':'transform:translateX(112%)');
+    var aiScrimStyle = scrimBase + (aiOpen?'opacity:1;pointer-events:auto':'opacity:0;pointer-events:none');
+
+    var chips = ai.chips.map(function(c){ return '<span style="font-size:11.5px;border-radius:999px;padding:5px 11px;cursor:pointer;color:'+ai.accent+';background:'+ai.iconBg+';border:1px solid '+ai.chipBorder+'">'+c+'</span>'; }).join('');
+
+    return '<div data-ai="close" style="'+aiScrimStyle+'"></div>'
+      + '<div data-ai="open" style="'+aiFabStyle+'">'
+        + '<span style="width:22px;height:22px;border-radius:7px;background:rgba(255,255,255,.16);display:flex;align-items:center;justify-content:center;font-family:\'Newsreader\',Georgia,serif;font-size:12px;font-weight:600;color:'+ai.fabGlyph+'">H</span>'
+        + '<span style="font-size:13px;font-weight:600">'+ai.label+'</span>'
+      + '</div>'
+      + '<div style="'+aiPanelStyle+'">'
+        + '<div style="padding:16px 18px;border-bottom:1px solid #EFEFEB;display:flex;align-items:center;gap:10px">'
+          + '<div style="width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none;background:'+ai.iconBg+'"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;font-weight:600;color:'+ai.accent+'">H</span></div>'
+          + '<div style="flex:1"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:16px;color:#1B1D22;line-height:1">'+ai.label+'</div><div style="display:flex;align-items:center;gap:5px;margin-top:3px"><span style="width:6px;height:6px;border-radius:50%;display:inline-block;background:'+ai.accent+'"></span><span style="font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:'+ai.accent+'">'+ai.scope+'</span></div></div>'
+          + '<div data-ai="close" style="width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#9A9EA6;font-size:17px;background:#F4F5F7">✕</div>'
+        + '</div>'
+        + '<div style="flex:1;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">'
+          + '<div style="max-width:230px;background:#F4F5F7;border:1px solid #ECECEA;border-radius:12px 12px 12px 4px;padding:11px 13px;font-size:12.5px;color:#3D4149;line-height:1.45">'+ai.q+'</div>'
+          + '<div style="align-self:flex-end;max-width:255px;border-radius:12px 12px 4px 12px;padding:12px 14px;font-size:12.5px;line-height:1.5;background:'+ai.aBg+';color:'+ai.aColor+'">'
+            + '<div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;margin-bottom:6px;color:'+ai.aAccent+'">'+ai.aTag+'</div>'
+            + ai.a
+          + '</div>'
+          + '<div style="display:flex;flex-wrap:wrap;gap:7px">'+chips+'</div>'
+        + '</div>'
+        + '<div style="padding:12px 16px;border-top:1px solid #EFEFEB">'
+          + '<div style="display:flex;align-items:center;gap:9px;background:#F4F5F7;border:1px solid #E6E6E2;border-radius:11px;padding:10px 12px"><span style="flex:1;font-size:12.5px;color:#9A9EA6">'+ai.placeholder+'</span><span style="background:#16233F;color:#fff;font-weight:600;font-size:11.5px;border-radius:7px;padding:5px 12px">Ask</span></div>'
+        + '</div>'
+      + '</div>';
+  }
+
+  // ------------------------------------------------------------------
+  // Root render
+  // ------------------------------------------------------------------
+  function renderScreen(screen){
+    // Isolate per-screen failures so one bad screen can never blank the shell.
+    try {
+      if(screen==='home') return renderHome(people[state.user]);
+      if(screen==='crm') return renderCRM();
+      if(screen==='renewals') return renderRenewals();
+      if(screen==='cases') return renderCases();
+      if(screen==='finance') return renderFinance();
+      if(screen==='carrier') return renderCarrier();
+      if(screen==='storage') return embedScreen('Storage', STORAGE_EMBED, 'NextCloud Files · client documents', '#4B77BE');
+      if(screen==='team') return embedScreen('Team Chat', TALK_EMBED, 'NextCloud Talk · channels & DMs', '#0F7B6C');
+      if(stubKeys.indexOf(screen)>=0) return renderStub(screen);
+      return renderHome(people[state.user]);
+    } catch(e){
+      return '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:40px"><div style="max-width:420px;text-align:center"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;margin-bottom:8px">This workspace hit an error</div><div style="font-size:12.5px;color:#9A9EA6;line-height:1.5">'+((e&&e.message)||e)+'</div></div></div>';
+    }
+  }
+
+  function render(){
+    var screen = state.screen;
+    var person = people[state.user];
+    var html = '<div style="display:flex;height:100vh;width:100%;overflow:hidden;background:#F3F4F6">'
+      + renderRail(screen)
+      + '<div style="flex:1;display:flex;flex-direction:column;min-width:0">'
+        + renderHeader(screen, person)
+        + '<div style="flex:1;position:relative;min-height:0">'
+          + renderScreen(screen)
+          + renderAI(screen)
+        + '</div>'
+      + '</div>'
+    + '</div>';
+    document.getElementById('app').innerHTML = html;
+    if(state.screen==='carrier' && !state.carrierEmbed) wireCarrier();
+  }
+
+  // ------------------------------------------------------------------
+  // Event delegation
+  // ------------------------------------------------------------------
+  document.getElementById('app').addEventListener('click', function(e){
+    var el = e.target.closest('[data-go],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    if(!el) return;
+
+    if(el.hasAttribute('data-go')){
+      selRenewal = null;
+      setState({ screen: el.getAttribute('data-go'), detail:false, caseDetail:false, aiOpen:false, carrierEmbed:false, financeEmbed:false });
+      return;
+    }
+    if(el.hasAttribute('data-carrier')){
+      setState({ carrierEmbed: el.getAttribute('data-carrier')==='embed' });
+      return;
+    }
+    if(el.hasAttribute('data-finance')){
+      setState({ financeEmbed: el.getAttribute('data-finance')==='embed' });
+      return;
+    }
+    if(el.hasAttribute('data-toggle')){
+      var key = el.getAttribute('data-toggle');
+      var done = Object.assign({}, state.done);
+      done[key] = !done[key];
+      setState({ done: done });
+      return;
+    }
+    if(el.hasAttribute('data-user')){
+      setState({ user: el.getAttribute('data-user') });
+      return;
+    }
+    if(el.hasAttribute('data-ai')){
+      setState({ aiOpen: el.getAttribute('data-ai')==='open' });
+      return;
+    }
+    if(el.hasAttribute('data-detail')){
+      var open = el.getAttribute('data-detail')==='open';
+      if(open && sources.renewals==='live'){
+        var idx = parseInt(el.getAttribute('data-idx'),10);
+        var row = renewalRows[idx];
+        selRenewal = (row && row._raw) ? row._raw : null;
+      } else if(!open){
+        selRenewal = null;
+      } else {
+        selRenewal = null; // sample data → show the sample Acme detail
+      }
+      setState({ detail: open });
+      return;
+    }
+    if(el.hasAttribute('data-casedetail')){
+      setState({ caseDetail: el.getAttribute('data-casedetail')==='open' });
+      return;
+    }
+  });
+
+  // ------------------------------------------------------------------
+  // Live data layer — fetch from the server-side proxy (/api/*), map the
+  // real Hermes/Command Center shapes onto the render arrays, and flip the
+  // per-section source flag. Every section falls back to sample data if its
+  // endpoint errors or times out, so a degraded backend never blanks the UI.
+  // ------------------------------------------------------------------
+  function money(n){ if(n==null||isNaN(n)) return '—'; return '$'+Math.round(n).toLocaleString('en-US'); }
+
+  var renewalStatusMap = {
+    CRITICAL:['Critical','#B4231F','#FBE9E7'],
+    AT_RISK:['At risk','#B9822A','#F7EEDB'],
+    SAFE:['On track','#2F6B4F','#EAF1EC'],
+    RENEWED:['Renewed','#2F6B4F','#EAF1EC'],
+    LAPSED:['Lapsed','#B4231F','#FBE9E7']
+  };
+
+  function applyRenewals(d){
+    if(!d || d._error || !Array.isArray(d.upcoming)) return false;
+    var up = d.upcoming;
+    renewalRows = up.slice(0,14).map(function(r){
+      var m = renewalStatusMap[r.risk_status] || ['—','#6B7078','#EFEFEC'];
+      return { client:r.client_name||'—', line:r.policy_number||'—', premium:money(r.premium_current),
+               days:(r.days_until!=null?(r.days_until+(r.days_until===1?' day':' days')):'—'),
+               status:m[0], statusColor:m[1], statusBg:m[2], owner:'—', _raw:r };
+    });
+    var by=d.by_risk||{}, bk=d.buckets||{};
+    var crit=((by.CRITICAL||{}).count)||0, atr=((by.AT_RISK||{}).count)||0;
+    var due30=(((bk.past_due||{}).count)||0)+(((bk.le7||{}).count)||0)+(((bk.le30||{}).count)||0);
+    var premAtRenewal = up.reduce(function(s,r){ return s+(r.premium_current||0); },0);
+    renewalKpis = [
+      { label:'Due in 30 days', value:String(due30), sub:'across all lines', color:'#1B1D22' },
+      { label:'Critical', value:String(crit), sub:'contact now', color:'#B4231F' },
+      { label:'At risk', value:String(atr), sub:'schedule outreach', color:'#B9822A' },
+      { label:'Premium at renewal', value:money(premAtRenewal), sub:((d.total||up.length)+' policies'), color:'#1B1D22' }
+    ];
+    sources.renewals='live'; return true;
+  }
+
+  var taskPriColor = { high:'#B4231F', medium:'#16233F', low:'#6B7078' };
+  function fmtDue(iso){
+    if(!iso) return '';
+    var d=new Date(iso); if(isNaN(d.getTime())) return '';
+    var today=new Date(); today.setHours(0,0,0,0);
+    var due=new Date(d); due.setHours(0,0,0,0);
+    var diff=Math.round((due.getTime()-today.getTime())/86400000);
+    if(diff<0) return 'Overdue';
+    if(diff===0) return 'Today';
+    if(diff===1) return 'Tomorrow';
+    var mon=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return mon[d.getMonth()]+' '+d.getDate();
+  }
+  function applyTasks(d){
+    if(!d || d._error) return false;
+    // Backend groups tasks by assignee display name ("Lamar"/"Gretchen").
+    var by = d.by_assignee || {};
+    var list = Array.isArray(d.tasks) ? d.tasks : null;
+    function mapList(arr){
+      return (arr||[]).slice(0,6).map(function(t){
+        var pri = (''+(t.priority||'')).toLowerCase();
+        return { color:(taskPriColor[pri]||'#16233F'),
+                 text:(t.title||t.text||t.name||'Task'),
+                 tag:(pri?pri.toUpperCase():'TASK'),
+                 due:fmtDue(t.due_at||t.dateEnd||t.due) };
+      });
+    }
+    function forName(name){
+      if(by[name]) return mapList(by[name]);
+      if(!list) return [];
+      return mapList(list.filter(function(t){ return (((t.assignee||t.assigned_to_email||'')+'').toLowerCase().indexOf(name.toLowerCase())>=0); }));
+    }
+    var l=forName('Lamar'), g=forName('Gretchen');
+    if(!l.length && !g.length) return false;
+    if(l.length) tasksByUser.lamar=l;
+    if(g.length) tasksByUser.gretchen=g;
+    sources.tasks='live'; return true;
+  }
+
+  function applyCommissions(d){
+    var list = Array.isArray(d)?d:(d&&Array.isArray(d.rows)?d.rows:(d&&Array.isArray(d.commissions)?d.commissions:null));
+    if(!list || !list.length) return false;
+    finRows = list.slice(0,12).map(function(r){
+      var exp=(r.expected_amount!=null?r.expected_amount:r.expected);
+      var rec=(r.actual_amount!=null?r.actual_amount:(r.received!=null?r.received:r.paid_amount));
+      var st = r.status || ((rec==null||rec===0)?'Pending':(exp!=null&&rec<exp?'Short':'Received'));
+      st = (''+st).charAt(0).toUpperCase()+(''+st).slice(1).toLowerCase();
+      var sm = vStat[st]||['#6B7078','#EFEFEC'];
+      return { carrier:(r.carrier||r.carrier_name||'—'), policy:(r.policy_number||r.policy||'—'), client:(r.client||r.client_name||r.insured||'—'),
+               expected:money(exp), received:money(rec), status:st, statusColor:sm[0], statusBg:sm[1] };
+    });
+    sources.commissions='live'; return true;
+  }
+
+  var caseCatMap = { marketing:['Marketing','#6D28D9','#EDE7FB'], claim:['Claim','#B4231F','#FBE9E7'], endorsement:['Endorsement','#2563EB','#E9EFFC'], service:['Service','#2F6B4F','#EAF1EC'], coi:['COI','#B9822A','#F7EEDB'], billing:['Billing','#6D28D9','#EDE7FB'] };
+  function nameFromEmail(e){ if(!e) return '—'; var l=(''+e).split('@')[0].split(/[._]/)[0]; return l ? l.charAt(0).toUpperCase()+l.slice(1) : '—'; }
+  function daysAgo(iso){ if(!iso) return ''; var ms=Date.now()-new Date(iso).getTime(); if(isNaN(ms)) return ''; var d=Math.max(0,Math.floor(ms/86400000)); return d+'d'; }
+  function applyCases(d){
+    var list = Array.isArray(d)?d:(d&&Array.isArray(d.cases)?d.cases:(d&&Array.isArray(d.items)?d.items:null));
+    if(!list || !list.length) return false;
+    caseRows = list.slice(0,10).map(function(r){
+      var ct = (''+(r.case_type||r.category||r.type||'service')).toLowerCase();
+      var cm = caseCatMap[ct] || [ct.charAt(0).toUpperCase()+ct.slice(1), '#2F6B4F', '#EAF1EC'];
+      var raw = (''+(r.status||'open'));
+      var due = r.due_at ? new Date(r.due_at).getTime() : null;
+      var overdue = raw.toLowerCase().indexOf('overdue')>=0 || (raw.toLowerCase()==='open' && due!=null && due < Date.now());
+      var status = overdue ? 'Overdue' : (raw.charAt(0).toUpperCase()+raw.slice(1));
+      return { subj:(r.title||r.subject||r.name||'Case'), client:(r.insured_name||r.client||r.client_name||'—'),
+               cat:cm[0], catColor:cm[1], catBg:cm[2],
+               tasks:'—',
+               age:daysAgo(r.opened_at||r.created_at), status:status,
+               statusColor:overdue?'#B4231F':'#3D4149', statusWeight:overdue?700:500,
+               owner:nameFromEmail(r.owner_email||r.owner||r.assignee) };
+    });
+    sources.cases='live'; return true;
+  }
+
+  function pull(path){
+    return fetch(path,{headers:{'Accept':'application/json'}})
+      .then(function(r){ return r.json(); })
+      .catch(function(){ return { _error:'fetch failed' }; });
+  }
+
+  function fetchLive(){
+    // Tasks are now served from Supabase (agency_crm_tasks) — the dead-Espo path
+    // was repointed 2026-07-24, so /api/tasks is safe to call again.
+    pull('/api/renewals').then(function(d){ if(applyRenewals(d)) render(); });
+    pull('/api/tasks').then(function(d){ if(applyTasks(d)) render(); });
+    pull('/api/commissions').then(function(d){ if(applyCommissions(d)) render(); });
+    pull('/api/cases').then(function(d){ if(applyCases(d)) render(); });
+    pull('/api/carriers').then(function(d){ if(applyCarriers(d)) render(); });
+  }
+
+  function applyCarriers(d){
+    if(!d || d._error) return false;
+    var list = Array.isArray(d.carriers) ? d.carriers : (Array.isArray(d) ? d : null);
+    if(!list || !list.length) return false;
+    carrierData = list;
+    sources.carrier = 'live';
+    return true;
+  }
+
+  render();
+  fetchLive();
+})();
+</script>
+</body>
+</html>

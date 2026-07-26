@@ -1,0 +1,13 @@
+{
+  "name": "rsg-agency-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RSG Agency Portal — unified hub shell over the Hermes Command Center (server-side proxy, zero runtime deps).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

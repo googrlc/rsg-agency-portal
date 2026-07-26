@@ -1,0 +1,9 @@
+# Deploy-time secrets. deploy.sh sources .env.deploy for HERMES_API_TOKEN and
+# RSG_INTAKE_API_KEY — it lives only on the box, chmod 600, and never here.
+.env.deploy
+.env.ops
+.env
+
+node_modules/
+*.log
+.DS_Store
