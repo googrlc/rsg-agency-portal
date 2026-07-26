@@ -30,11 +30,19 @@ const API_BASE = (process.env.HERMES_API_URL || 'http://rsg-hermes-api:8787').re
 // Carrier directory lives in the rsg-carrierhub app (different Supabase table +
 // service-role endpoint), reachable via the docker host gateway. No auth needed.
 const CARRIERHUB_URL = (process.env.CARRIERHUB_URL || 'http://172.17.0.1:3200').replace(/\/+$/, '');
-// The intake gateway (rsg-intake-gate, the nowcerts-write-gateway app). It binds
-// 127.0.0.1 on the host, so from inside this container it is reachable only via
-// the docker host gateway. Deliberately NOT published on the tailnet: the portal
-// is the single door, and proxying keeps that true for intake too.
-const INTAKE_URL = (process.env.INTAKE_GATEWAY_URL || 'http://172.17.0.1:8790').replace(/\/+$/, '');
+// The intake gateway (rsg-intake-gate, the nowcerts-write-gateway app), reached
+// container-to-container over the shared network — the same way this app reaches
+// rsg-hermes-api.
+//
+// NOT via the docker host gateway: rsg-intake-gate publishes 127.0.0.1:8790,
+// which is loopback-ONLY, so 172.17.0.1:8790 cannot connect and the intake panel
+// 502s. (rsg-carrierhub publishes 0.0.0.0:3200, which is why the host route works
+// for that one and misleadingly looks like the house style.) Going over
+// hermes-shared also means intake needs no published host port at all.
+//
+// Deliberately not exposed on the tailnet either: the portal is the single door,
+// and proxying keeps that true for intake too.
+const INTAKE_URL = (process.env.INTAKE_GATEWAY_URL || 'http://rsg-intake-gate:8787').replace(/\/+$/, '');
 const API_TOKEN = process.env.HERMES_API_TOKEN || '';
 const INTAKE_KEY = process.env.RSG_INTAKE_API_KEY || '';
 const TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || '8000', 10);
