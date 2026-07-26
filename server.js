@@ -69,6 +69,62 @@ function isIntakePath(p){
   return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Operational writes to the Hermes backend.
+//
+// An allowlist, not an open door. The portal holds the backend bearer and has no
+// login of its own, so whatever is listed here is exercisable by anyone who can
+// reach the portal. That is an accepted trade for day-to-day case and task work
+// on a two-person tailnet — it is NOT acceptable for money or for the system of
+// record, so commission approve/reject, ledger overrides, push-to-ams and
+// hermes/dispatch are deliberately absent and still answer 405.
+//
+// `to` rewrites the backend path when it differs from the portal path; omit it
+// to forward unchanged. $1 interpolates the first capture group.
+// ─────────────────────────────────────────────────────────────────────────────
+const WRITE_ROUTES = [
+  // Tasks — create, edit, complete.
+  { m: 'POST',   re: /^\/api\/tasks$/ },
+  { m: 'PATCH',  re: /^\/api\/tasks\/([0-9a-f-]{36})$/ },
+  { m: 'POST',   re: /^\/api\/tasks\/([0-9a-f-]{36})\/complete$/,
+    to: '/api/command-center/tasks/$1/complete' },
+
+  // Cases — open (ad-hoc or from a template) and close with its resolution.
+  { m: 'POST',   re: /^\/api\/cases$/ },
+  { m: 'POST',   re: /^\/api\/cases\/from-template$/ },
+  { m: 'POST',   re: /^\/api\/cases\/([0-9a-f-]{36})\/close$/ },
+
+  // Pipeline — create and move deals.
+  { m: 'POST',   re: /^\/api\/opportunities$/ },
+  { m: 'PATCH',  re: /^\/api\/opportunities\/([0-9a-f-]{36})$/ },
+  { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/stage$/ },
+
+  // Retry a stuck sync job — recovery, not a new write.
+  { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ }
+];
+
+// Read routes that take a path parameter, so they can't live in the flat ROUTES map.
+const READ_PATTERNS = [
+  { re: /^\/api\/case-templates$/ },
+  { re: /^\/api\/cases\/([0-9a-f-]{36})\/progress$/ },
+  { re: /^\/api\/cases\/([0-9a-f-]{36})$/ },
+  { re: /^\/api\/cases\/([0-9a-f-]{36})\/tasks$/ }
+];
+
+function matchWrite(method, p){
+  for (const r of WRITE_ROUTES) {
+    if (r.m !== method) continue;
+    const hit = p.match(r.re);
+    if (hit) return r.to ? r.to.replace('$1', hit[1]) : p;
+  }
+  return null;
+}
+
+function matchRead(p){
+  for (const r of READ_PATTERNS) if (r.re.test(p)) return p;
+  return null;
+}
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js':   'text/javascript; charset=utf-8',
@@ -219,7 +275,23 @@ const server = http.createServer((req, res) => {
   }
 
   if (p.indexOf('/api/') === 0) {
-    if (req.method !== 'GET') return sendJson(res, 405, { _error: 'read-only proxy' });
+    // Allowlisted operational writes (tasks, cases, pipeline). Streamed through
+    // with real status codes: a refused close must report WHY it was refused,
+    // not fall back to sample data like a dashboard tile.
+    if (req.method !== 'GET') {
+      const writeTarget = matchWrite(req.method, p);
+      if (writeTarget) {
+        return proxyPass(req, res, API_BASE + writeTarget + (parsed.search || ''),
+                         { timeoutMs: TIMEOUT_MS });
+      }
+      return sendJson(res, 405, {
+        _error: 'not an allowed write',
+        detail: 'money and AMS endpoints stay behind their approval flows'
+      });
+    }
+    // Parameterised reads (case detail, checklist progress, template menu).
+    const readTarget = matchRead(p);
+    if (readTarget) return proxyGet(API_BASE + readTarget + (parsed.search || ''), res);
     // Carrier directory comes from the carrierhub app, not the hermes backend.
     if (p === '/api/carriers') {
       return proxyGet(CARRIERHUB_URL + '/api/carriers', res, { noAuth: true });
