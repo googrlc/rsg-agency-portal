@@ -30,9 +30,17 @@ const API_BASE = (process.env.HERMES_API_URL || 'http://rsg-hermes-api:8787').re
 // Carrier directory lives in the rsg-carrierhub app (different Supabase table +
 // service-role endpoint), reachable via the docker host gateway. No auth needed.
 const CARRIERHUB_URL = (process.env.CARRIERHUB_URL || 'http://172.17.0.1:3200').replace(/\/+$/, '');
+// The intake gateway (rsg-intake-gate, the nowcerts-write-gateway app). It binds
+// 127.0.0.1 on the host, so from inside this container it is reachable only via
+// the docker host gateway. Deliberately NOT published on the tailnet: the portal
+// is the single door, and proxying keeps that true for intake too.
+const INTAKE_URL = (process.env.INTAKE_GATEWAY_URL || 'http://172.17.0.1:8790').replace(/\/+$/, '');
 const API_TOKEN = process.env.HERMES_API_TOKEN || '';
 const INTAKE_KEY = process.env.RSG_INTAKE_API_KEY || '';
 const TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || '8000', 10);
+// Intake is document upload + OCR + AMS round-trips; 8s is a read-dashboard
+// timeout and would kill a legitimate submission mid-flight.
+const INTAKE_TIMEOUT_MS = parseInt(process.env.INTAKE_TIMEOUT_MS || '120000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // Portal route → backend REST path (read-only).
@@ -44,6 +52,22 @@ const ROUTES = {
   '/api/cases':       '/api/cases',
   '/api/sync-health': '/api/hermes/sync-health'
 };
+
+// Paths the intake gateway owns, forwarded verbatim (method, body, headers).
+// The built intake UI calls these root-relative, so hosting it on this origin
+// needs no path rewriting — these must not collide with ROUTES above.
+const INTAKE_PATHS = [
+  /^\/api\/intakes(\/|$)/,
+  /^\/api\/intake\/documents$/,
+  /^\/api\/proposals(\/|$)/,
+  /^\/api\/nowcerts\//,
+  /^\/api\/reference\//
+];
+
+function isIntakePath(p){
+  for (let i = 0; i < INTAKE_PATHS.length; i++) if (INTAKE_PATHS[i].test(p)) return true;
+  return false;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -102,6 +126,53 @@ function proxyGet(fullUrl, res, opts){
   req.end();
 }
 
+// Stream a request through to an upstream, preserving method, body, status and
+// content-type. Unlike proxyGet this does NOT coerce to JSON or swallow errors:
+// intake carries multipart uploads, HTML and PDFs, and a failed submission must
+// surface its real status so the operator sees it rather than a silent success.
+function proxyPass(req, res, fullUrl, opts){
+  opts = opts || {};
+  const target = url.parse(fullUrl);
+  const lib = target.protocol === 'https:' ? https : http;
+
+  // Hop-by-hop and host headers must not be forwarded verbatim.
+  const skip = { host:1, connection:1, 'keep-alive':1, 'proxy-authenticate':1,
+                 'proxy-authorization':1, te:1, trailer:1, 'transfer-encoding':1,
+                 upgrade:1, 'accept-encoding':1 };
+  const headers = {};
+  for (const k in req.headers) if (!skip[k.toLowerCase()]) headers[k] = req.headers[k];
+  // Credentials are attached here, server-side. The browser never holds them.
+  if (API_TOKEN) headers['Authorization'] = 'Bearer ' + API_TOKEN;
+  if (INTAKE_KEY) headers['X-RSG-API-Key'] = INTAKE_KEY;
+
+  const upstream = lib.request({
+    protocol: target.protocol,
+    hostname: target.hostname,
+    port: target.port,
+    path: target.path,
+    method: req.method,
+    headers: headers
+  }, (up) => {
+    const out = {};
+    for (const k in up.headers) if (!skip[k.toLowerCase()]) out[k] = up.headers[k];
+    res.writeHead(up.statusCode || 502, out);
+    up.pipe(res);
+  });
+
+  const timeout = opts.timeoutMs || TIMEOUT_MS;
+  upstream.setTimeout(timeout, () => {
+    upstream.destroy();
+    if (!res.headersSent) sendJson(res, 504, { _error: 'intake gateway timeout', timeout_ms: timeout });
+    else res.end();
+  });
+  upstream.on('error', (e) => {
+    if (!res.headersSent) sendJson(res, 502, { _error: 'intake gateway unreachable', detail: String(e.code || e.message) });
+    else res.end();
+  });
+
+  req.pipe(upstream);
+}
+
 function serveStatic(reqPath, res){
   let rel = reqPath === '/' ? '/index.html' : reqPath;
   rel = rel.replace(/\?.*$/, '');
@@ -129,7 +200,23 @@ const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url);
   const p = parsed.pathname;
 
-  if (p === '/healthz') return sendJson(res, 200, { ok: true, backend: API_BASE, token: API_TOKEN ? 'set' : 'missing' });
+  if (p === '/healthz') return sendJson(res, 200, {
+    ok: true, backend: API_BASE, token: API_TOKEN ? 'set' : 'missing',
+    intake: INTAKE_URL, intake_key: INTAKE_KEY ? 'set' : 'missing'
+  });
+
+  // The intake gateway's own operator UI, served on this origin so its
+  // root-relative /api/* calls land back here and get forwarded below.
+  if (p === '/intake' || p === '/intake/') {
+    return proxyPass(req, res, INTAKE_URL + '/app', { timeoutMs: INTAKE_TIMEOUT_MS });
+  }
+
+  // Intake API surface — forwarded verbatim, writes included. Checked BEFORE the
+  // read-only guard: that guard protects the Hermes dashboard facade, and intake
+  // is a write path by definition.
+  if (isIntakePath(p)) {
+    return proxyPass(req, res, INTAKE_URL + req.url, { timeoutMs: INTAKE_TIMEOUT_MS });
+  }
 
   if (p.indexOf('/api/') === 0) {
     if (req.method !== 'GET') return sendJson(res, 405, { _error: 'read-only proxy' });

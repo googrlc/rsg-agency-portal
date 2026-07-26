@@ -252,7 +252,30 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     team:['Channels for renewals, service & carriers','Threaded questions with @mentions','Share documents straight from Storage'],
     sops:['Searchable playbooks by workflow','Step-by-step checklists','Version history and owners'],
   };
-  var stubKeys = ['intake','sops'];
+  var stubKeys = ['sops'];
+
+  // The intake gateway's operator UI, proxied onto this origin by server.js at
+  // /intake. Same-origin on purpose: the app's API calls are root-relative, so
+  // they land back here and are forwarded to the gateway with the credentials
+  // attached server-side.
+  var INTAKE_EMBED = '/intake';
+
+  // Same-origin embed. Deliberately NOT embedScreen(): that one gates on
+  // onTailnetHttps() because NextCloud refuses to be framed from anywhere but
+  // the Tailscale HTTPS origin. Intake has no such constraint — it is served by
+  // this very process — so reusing that guard would black out a working panel
+  // whenever the portal is reached over plain http (e.g. http://100.75.67.72:3400).
+  function embedLocalScreen(title, src, subtitle, accent){
+    return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
+      + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
+        + '<span style="width:8px;height:8px;border-radius:3px;background:'+(accent||'#B9822A')+'"></span>'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+title+'</span>'
+        + '<span style="font-size:11.5px;color:#96999F">'+(subtitle||'')+'</span>'
+        + '<a href="'+src+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
+      + '</div>'
+      + '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+title+'" allow="clipboard-read; clipboard-write; fullscreen"></iframe>'
+    + '</div>';
+  }
 
   var aiCfg = {
     home:{ label:'Ask Hermes', scope:'All desks', accent:'#16233F', iconBg:'#E7EAF0', chipBorder:'#d5dae6', fabBg:'#16233F', fabGlyph:'#E0A82E', q:'Which renewals are at risk this week?', aTag:'Hermes', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'12 renewals are at risk, $6,566 in commission is short across 4 carriers, and 3 cases are overdue. Acme Roofing is the most urgent — it lapses tomorrow.', chips:['At-risk renewals','Money to chase','Overdue cases'], placeholder:'Ask Hermes anything across the agency…' },
@@ -795,6 +818,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if(screen==='carrier') return renderCarrier();
       if(screen==='storage') return embedScreen('Storage', STORAGE_EMBED, 'NextCloud Files · client documents', '#4B77BE');
       if(screen==='team') return embedScreen('Team Chat', TALK_EMBED, 'NextCloud Talk · channels & DMs', '#0F7B6C');
+      if(screen==='intake') return embedLocalScreen('Intake', INTAKE_EMBED, 'Evidence in, assessed & verified out', '#B9822A');
       if(stubKeys.indexOf(screen)>=0) return renderStub(screen);
       return renderHome(people[state.user]);
     } catch(e){
