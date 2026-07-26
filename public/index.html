@@ -414,7 +414,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
             + '<div data-user="lamar" style="'+pill(u==='lamar')+'">Lamar</div>'
             + '<div data-user="gretchen" style="'+pill(u==='gretchen')+'">Gretchen</div>'
           + '</div>'
-          + '<div style="display:flex;flex-direction:column">'+tasks+'</div>'
+          + '<div style="display:flex;flex-direction:column">'
+            + (tasks || '<div style="padding:18px 2px;font-size:12.5px;color:#96999F">'
+                 + (sources.tasks==='live' ? 'Nothing due — queue is clear.'
+                                           : 'Loading tasks…') + '</div>')
+          + '</div>'
         + '</div>'
       + '</div>'
     + '</div>';
@@ -969,9 +973,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return mapList(list.filter(function(t){ return (((t.assignee||t.assigned_to_email||'')+'').toLowerCase().indexOf(name.toLowerCase())>=0); }));
     }
     var l=forName('Lamar'), g=forName('Gretchen');
-    if(!l.length && !g.length) return false;
-    if(l.length) tasksByUser.lamar=l;
-    if(g.length) tasksByUser.gretchen=g;
+    // A successful fetch returning no tasks for someone is a real answer —
+    // "nothing due" — not a failure. Only replacing a list when it was non-empty
+    // is what left Home showing invented work (Acme Roofing, Example Contracting
+    // LLC) to whoever had an empty queue, while the other person saw live data.
+    // Replace both once the backend has actually answered; renderHome draws an
+    // empty state rather than falling back to fiction.
+    tasksByUser.lamar = l;
+    tasksByUser.gretchen = g;
     sources.tasks='live'; return true;
   }
 
