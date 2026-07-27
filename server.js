@@ -138,6 +138,9 @@ const MIME = {
   '.js':   'text/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  // Chrome ignores a manifest served as anything else, and the install prompt
+  // then never appears with no visible error.
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg':  'image/svg+xml',
   '.png':  'image/png',
   '.ico':  'image/x-icon'
@@ -255,7 +258,12 @@ function serveStatic(reqPath, res){
       res.writeHead(404); return res.end('not found');
     }
     const ext = path.extname(abs).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // The worker must never be served from browser cache, or a deploy can leave
+    // clients pinned to an old shell indefinitely — the worker is what fetches
+    // its own replacement.
+    if (rel === '/sw.js') headers['Cache-Control'] = 'no-cache';
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
