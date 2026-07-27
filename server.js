@@ -58,8 +58,19 @@ const ROUTES = {
   '/api/retention':   '/api/command-center/retention',
   '/api/commissions': '/api/commissions',
   '/api/cases':       '/api/cases',
-  '/api/sync-health': '/api/hermes/sync-health'
+  '/api/sync-health': '/api/hermes/sync-health',
+  // The CRM screen's book. It shipped with hardcoded counts (414 clients, 614
+  // policies) and a nav of dead <div>s, so none of this was ever reachable.
+  '/api/workspace-stats': '/api/workspace-stats',
+  '/api/clients':     '/api/clients',
+  '/api/policies':    '/api/policies',
+  '/api/pipeline':    '/api/opportunities'
 };
+
+// Leads reads NowCerts live and is the slowest thing the backend exposes; it gets
+// the intake budget rather than the 8s dashboard one so it degrades to an empty
+// panel instead of poisoning a whole page load.
+const SLOW_ROUTES = { '/api/leads': '/api/leads' };
 
 // Paths the intake gateway owns, forwarded verbatim (method, body, headers).
 // The built intake UI calls these root-relative, so hosting it on this origin
@@ -108,7 +119,14 @@ const WRITE_ROUTES = [
   { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/stage$/ },
 
   // Retry a stuck sync job — recovery, not a new write.
-  { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ }
+  { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ },
+
+  // Ask Hermes. A POST because it carries a prompt, but read-only in effect —
+  // the backend previews write actions rather than running them. The panel used
+  // to render a hardcoded answer with invented figures under a "Hermes" label,
+  // which is the one thing an assistant panel must never do.
+  // An LLM turn takes far longer than a dashboard read; 8s would kill it mid-answer.
+  { m: 'POST',   re: /^\/api\/ask$/, to: '/api/command-center/ask', timeoutMs: 120000 }
 ];
 
 // Read routes that take a path parameter, so they can't live in the flat ROUTES map.
@@ -123,7 +141,7 @@ function matchWrite(method, p){
   for (const r of WRITE_ROUTES) {
     if (r.m !== method) continue;
     const hit = p.match(r.re);
-    if (hit) return r.to ? r.to.replace('$1', hit[1]) : p;
+    if (hit) return { path: r.to ? r.to.replace('$1', hit[1]) : p, timeoutMs: r.timeoutMs };
   }
   return null;
 }
@@ -188,7 +206,8 @@ function proxyGet(fullUrl, res, opts){
     });
   });
 
-  req.setTimeout(TIMEOUT_MS, () => { req.destroy(); done(200, { _error: 'upstream timeout', timeout_ms: TIMEOUT_MS }); });
+  const budget = opts.timeoutMs || TIMEOUT_MS;
+  req.setTimeout(budget, () => { req.destroy(); done(200, { _error: 'upstream timeout', timeout_ms: budget }); });
   req.on('error', (e) => { done(200, { _error: 'upstream unreachable', detail: String(e.code || e.message) }); });
   req.end();
 }
@@ -297,8 +316,8 @@ const server = http.createServer((req, res) => {
     if (req.method !== 'GET') {
       const writeTarget = matchWrite(req.method, p);
       if (writeTarget) {
-        return proxyPass(req, res, API_BASE + writeTarget + (parsed.search || ''),
-                         { timeoutMs: TIMEOUT_MS });
+        return proxyPass(req, res, API_BASE + writeTarget.path + (parsed.search || ''),
+                         { timeoutMs: writeTarget.timeoutMs || TIMEOUT_MS });
       }
       return sendJson(res, 405, {
         _error: 'not an allowed write',
@@ -312,9 +331,13 @@ const server = http.createServer((req, res) => {
     if (p === '/api/carriers') {
       return proxyGet(CARRIERHUB_URL + '/api/carriers', res, { noAuth: true });
     }
+    if (SLOW_ROUTES[p]) {
+      return proxyGet(API_BASE + SLOW_ROUTES[p] + (parsed.search || ''), res,
+                      { timeoutMs: Math.max(TIMEOUT_MS, 45000) });
+    }
     const backendPath = ROUTES[p];
     if (!backendPath) return sendJson(res, 404, { _error: 'unknown api route' });
-    return proxyGet(API_BASE + backendPath, res);
+    return proxyGet(API_BASE + backendPath + (parsed.search || ''), res);
   }
 
   return serveStatic(p, res);
