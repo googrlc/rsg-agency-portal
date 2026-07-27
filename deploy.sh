@@ -26,6 +26,9 @@ if [ -f .env.deploy ]; then echo "==> sourcing .env.deploy"; set -a; . ./.env.de
 
 : "${HERMES_API_URL:=http://rsg-hermes-api:8787}"
 : "${UPSTREAM_TIMEOUT_MS:=8000}"
+# Intake gateway, reached container-to-container over hermes-shared.
+: "${INTAKE_GATEWAY_URL:=http://rsg-intake-gate:8787}"
+: "${INTAKE_TIMEOUT_MS:=120000}"
 
 # The backend bearer powers /api/* (server-side, never sent to the browser).
 # Fall back to the running container's value so a bare re-run keeps working.
@@ -55,6 +58,8 @@ docker run -d --name "$NAME" \
   -e HERMES_API_TOKEN="$HERMES_API_TOKEN" \
   -e RSG_INTAKE_API_KEY="${RSG_INTAKE_API_KEY:-}" \
   -e UPSTREAM_TIMEOUT_MS="$UPSTREAM_TIMEOUT_MS" \
+  -e INTAKE_GATEWAY_URL="$INTAKE_GATEWAY_URL" \
+  -e INTAKE_TIMEOUT_MS="$INTAKE_TIMEOUT_MS" \
   "$IMAGE"
 
 # ---- health check ----------------------------------------------------------
@@ -74,6 +79,7 @@ else
   docker tag "${NAME}:rollback" "$IMAGE" 2>/dev/null || true
   docker run -d --name "$NAME" --restart unless-stopped --network "$NETWORK" -p "$PORT_MAP" \
     -e PORT=3000 -e HERMES_API_URL="$HERMES_API_URL" -e HERMES_API_TOKEN="$HERMES_API_TOKEN" \
-    -e RSG_INTAKE_API_KEY="${RSG_INTAKE_API_KEY:-}" -e UPSTREAM_TIMEOUT_MS="$UPSTREAM_TIMEOUT_MS" "$IMAGE" 2>/dev/null || true
+    -e RSG_INTAKE_API_KEY="${RSG_INTAKE_API_KEY:-}" -e UPSTREAM_TIMEOUT_MS="$UPSTREAM_TIMEOUT_MS" \
+    -e INTAKE_GATEWAY_URL="$INTAKE_GATEWAY_URL" -e INTAKE_TIMEOUT_MS="$INTAKE_TIMEOUT_MS" "$IMAGE" 2>/dev/null || true
   exit 1
 fi
