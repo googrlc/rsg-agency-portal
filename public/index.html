@@ -45,8 +45,25 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var selRenewal = null;  // live renewal row chosen for the detail overlay
   var carrierData = null; // cached carrier directory from carrierhub
   // Full apps embedded in the hybrid workspaces, reachable over the tailnet.
-  var CARRIERHUB_EMBED = 'http://100.75.67.72:3200/';
-  var COMMISSION_EMBED = 'http://100.75.67.72:3100/';
+  //
+  // These MUST be https. The portal is served at https://…ts.net:8447, and a
+  // browser silently refuses to load an http iframe inside an https page (mixed
+  // content) — the pane just goes blank with nothing but a console warning. The
+  // previous http://100.75.67.72:{3200,3100} values were blocked exactly that
+  // way, which is why Carrier and Finance never opened here.
+  //
+  // `tailscale serve` already publishes both over TLS on this host:
+  //   :8445 -> 127.0.0.1:3200  carrierhub
+  //   :8446 -> 127.0.0.1:3300  commission tracker (the *tailnet* container,
+  //            which auto-logs in on the shared account — :3100 is the
+  //            public-facing one and would have stopped at a login screen)
+  // Both answer with framing allowed (:8446 sends frame-ancestors *).
+  //
+  // https embeds are also correct when the portal itself is reached over plain
+  // http at 100.75.67.72:3400 — a secure frame in an insecure page is fine.
+  var TAILNET_BASE = 'https://hermes-gretch.tail1cbc83.ts.net';
+  var CARRIERHUB_EMBED = TAILNET_BASE + ':8445/';
+  var COMMISSION_EMBED = TAILNET_BASE + ':8446/';
   // NextCloud (Files + Talk). Framing is allowed only from the tailnet HTTPS
   // origin (frame-ancestors https://*.tail1cbc83.ts.net:*), so these panes load
   // when the portal is opened at https://hermes-gretch.tail1cbc83.ts.net:8447/.
@@ -74,8 +91,27 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+  // An http iframe inside an https page is dropped by the browser with no visible
+  // error — the operator just gets a white rectangle. Catch that here and say so,
+  // rather than shipping a blank pane and calling it an embed.
+  function mixedContent(src){
+    try { return location.protocol === 'https:' && /^http:\/\//i.test(src); }
+    catch(e){ return false; }
+  }
+  function blockedNote(title, src){
+    return '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:40px">'
+      + '<div style="max-width:460px;text-align:center">'
+        + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;margin-bottom:8px">'+title+' can\'t be embedded over http</div>'
+        + '<div style="font-size:13px;color:#6B7078;line-height:1.55">This portal is served over https, and the browser blocks an insecure frame inside it. '
+          + '<a href="'+src+'" target="_blank" rel="noopener" style="color:#2563EB">Open '+title+' in a new tab ↗</a></div>'
+      + '</div></div>';
+  }
+
   // Shared inline-embed pane: header bar (back + open-in-new-tab) + iframe.
   function embedPane(backLabel, src, dataAttr, subtitle){
+    var body = mixedContent(src)
+      ? blockedNote(backLabel, src)
+      : '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+backLabel+'" allow="clipboard-read; clipboard-write; fullscreen"></iframe>';
     return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
       + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
         + '<div '+dataAttr+'="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ '+backLabel+'</div>'
@@ -83,7 +119,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:11.5px;color:#96999F">'+(subtitle||'Full app · live')+'</span>'
         + '<a href="'+src+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
       + '</div>'
-      + '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+backLabel+'"></iframe>'
+      + body
     + '</div>';
   }
   function anyLive(){ return Object.keys(sources).some(function(k){ return sources[k]==='live'; }); }
@@ -709,16 +745,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }).join('');
   }
   function renderCarrier(){
+    // Was a hand-rolled copy of embedPane, which meant it missed the
+    // mixed-content guard. Same markup, one source of truth.
     if(state.carrierEmbed){
-      return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
-        + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
-          + '<div data-carrier="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Carrier overview</div>'
-          + '<div style="width:1px;height:18px;background:#E2E1DC"></div>'
-          + '<span style="font-size:11.5px;color:#96999F">Full Carrier Hub · live</span>'
-          + '<a href="'+CARRIERHUB_EMBED+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
-        + '</div>'
-        + '<iframe src="'+CARRIERHUB_EMBED+'" style="flex:1;width:100%;border:0" title="Carrier Hub"></iframe>'
-      + '</div>';
+      return embedPane('Carrier overview', CARRIERHUB_EMBED, 'data-carrier', 'Full Carrier Hub · live');
     }
     var loaded = !!carrierData, list = carrierData || [];
     var s = loaded ? carrierStats(list) : { total:'—', canWrite:'—', active:'—', contacts:'—' };
