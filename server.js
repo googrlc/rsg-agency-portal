@@ -119,6 +119,11 @@ const WRITE_ROUTES = [
   { m: 'PATCH',  re: /^\/api\/opportunities\/([0-9a-f-]{36})$/ },
   { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/stage$/ },
 
+  // Correct a client field. An override, not an AMS write: it outranks the
+  // synced value until NowCerts reports the same thing. Write-back to the AMS
+  // is a separate decision and deliberately not wired here.
+  { m: 'POST',   re: /^\/api\/clients\/([0-9a-f-]{36})\/override$/ },
+
   // Retry a stuck sync job — recovery, not a new write.
   { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ },
 
@@ -133,6 +138,8 @@ const WRITE_ROUTES = [
 // Read routes that take a path parameter, so they can't live in the flat ROUTES map.
 const READ_PATTERNS = [
   { re: /^\/api\/case-templates$/ },
+  // Client 360 — the record plus their policies, cases, tasks and opportunities.
+  { re: /^\/api\/clients\/([0-9a-f-]{36})$/ },
   { re: /^\/api\/cases\/([0-9a-f-]{36})\/progress$/ },
   { re: /^\/api\/cases\/([0-9a-f-]{36})$/ },
   { re: /^\/api\/cases\/([0-9a-f-]{36})\/tasks$/ }
