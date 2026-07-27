@@ -37,7 +37,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false, crmView:'workspace' };
+  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false, crmView:'workspace', client:null };
   function setState(patch){ Object.assign(state, patch); render(); }
 
   // Per-section data source. Starts 'pending' and only ever becomes 'live' — the
@@ -220,7 +220,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     tasks:     { label:'Tasks',    endpoint:'/api/tasks',    key:'tasks',
                  cols:[['title','Task'],['status','Status','chip'],['priority','Priority','chip'],['assignee','Assignee'],['due_at','Due','date'],['case_id','Scope','scope']] },
   };
-  var crmData = {};   // view key -> rows | {_error}
+  var crmData = {};      // view key -> rows | {_error}
+  var clientData = null; // the open client's 360: record, policies, cases, tasks
+  var clientEdit = {};   // field -> in-progress value, before it is saved
 
   // Renewals
   var renewalKpis = [
@@ -496,6 +498,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · overdue</span>';
     return esc(txt);
   }
+  // NowCerts GUIDs are read-only: fine to show — they are how you match a record
+  // against the AMS — but never editable. The enforcement is the override
+  // allowlist, which carries no identifier, not the renderer.
   function crmCell(r, c){
     var v = r[c[0]], fmt = c[2], txt;
     if(fmt==='money') txt = money(v);
@@ -508,6 +513,124 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     else txt = (v==null||v==='' ? '—' : esc(String(v)));
     return '<span style="font-size:12.5px;color:#3D4149;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
          + (fmt==='money'?';text-align:right;font-variant-numeric:tabular-nums':'')+'">'+txt+'</span>';
+  }
+
+  // ---- Client 360 -----------------------------------------------------------
+  // The CRM was a set of read-only lists; this is the "open a client and work on
+  // them" surface. Edits are corrections (overrides) held in the portal, NOT
+  // writes to NowCerts — AMS write-back is a separate decision.
+  var CLIENT_FIELDS = [
+    ['insured_name','Name'], ['client_type','Type'], ['email','Email'], ['phone','Phone'],
+    ['address','Address'], ['city','City'], ['state','State'], ['zip','ZIP'], ['notes','Notes'],
+  ];
+
+  function clientField(rec, key, label, overridden){
+    var pending = Object.prototype.hasOwnProperty.call(clientEdit, key);
+    var val = pending ? clientEdit[key] : (rec[key] == null ? '' : String(rec[key]));
+    var was = overridden[key];
+    return '<div style="display:flex;flex-direction:column;gap:4px">'
+      + '<label style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+label
+        + (Object.prototype.hasOwnProperty.call(overridden,key)
+            ? ' <span title="Corrected in the portal. NowCerts still shows the old value." style="color:#B9822A">· corrected</span>' : '')
+      + '</label>'
+      + '<input data-cfield="'+key+'" value="'+esc(val)+'" '
+        + 'style="border:1px solid '+(pending?'#B9822A':'#E6E6E2')+';border-radius:9px;padding:8px 11px;font:inherit;'
+        + 'font-size:13px;color:#25282E;background:'+(pending?'#FFFBF2':'#fff')+'"/>'
+      + (Object.prototype.hasOwnProperty.call(overridden,key)
+          ? '<span style="font-size:11px;color:#9A9EA6">AMS: '+esc(was==null?'(blank)':String(was))+'</span>' : '')
+    + '</div>';
+  }
+
+  function miniList(title, rows, cols, empty){
+    var head = cols.map(function(c){ return '<span>'+c[1]+'</span>'; }).join('');
+    var grid = 'display:grid;grid-template-columns:repeat('+cols.length+',minmax(0,1fr));gap:10px;';
+    var body = rows.length
+      ? rows.map(function(r){
+          return '<div style="'+grid+'padding:9px 14px;border-top:1px solid #F2F2EE">'
+            + cols.map(function(c){ return crmCell(r, c); }).join('') + '</div>';
+        }).join('')
+      : '<div style="padding:16px 14px;font-size:12.5px;color:#96999F">'+empty+'</div>';
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:12px;overflow:hidden">'
+      + '<div style="padding:11px 14px;font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+title
+        + ' <span style="font-size:11.5px;color:#9A9EA6">'+rows.length+'</span></div>'
+      + (rows.length ? '<div style="'+grid+'padding:8px 14px;background:#FAFAF7;border-top:1px solid #EFEFEB;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+head+'</div>' : '')
+      + body
+    + '</div>';
+  }
+
+  function renderClientDetail(){
+    var d = clientData;
+    if (!d || d.loading) {
+      return '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#96999F;font-size:13px">Loading client…</div>';
+    }
+    if (d.error || !d.client) {
+      return '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:40px">'
+        + '<div style="text-align:center"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:19px;color:#1B1D22;margin-bottom:6px">Couldn\'t open that client</div>'
+        + '<div style="font-size:12.5px;color:#6B7078">'+esc(d.error || 'no record returned')+'</div>'
+        + '<div data-client="close" style="margin-top:14px;font-size:12.5px;color:#2563EB;cursor:pointer">‹ Back to clients</div></div></div>';
+    }
+    var rec = d.client, ovr = rec._overridden || {};
+    var dirty = Object.keys(clientEdit).length;
+
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:22px 26px">'
+      + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">'
+        + '<div data-client="close" style="font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Clients</div>'
+        + '<div style="width:1px;height:16px;background:#E2E1DC"></div>'
+        + '<span style="font-size:11.5px;color:#96999F">Corrections are held in the CRM — they do not write to NowCerts</span>'
+      + '</div>'
+      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:27px;color:#1B1D22;margin:6px 0 2px;font-weight:500">'+esc(rec.insured_name || '—')+'</h1>'
+      + '<div style="font-size:12.5px;color:#787C84;margin-bottom:18px">'+esc(rec.client_type || '—')
+        + ' · '+d.counts.policies+' policies · '+d.counts.cases+' cases · '+d.counts.tasks+' tasks'
+        + ' · '+d.counts.opportunities+' opportunities</div>'
+      + '<div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.25fr);gap:18px;align-items:start">'
+        + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+          + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">'
+            + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Details</span>'
+            + (dirty
+                ? '<span data-client="save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+dirty+' change'+(dirty===1?'':'s')+'</span>'
+                : '<span style="font-size:11.5px;color:#9A9EA6">Edit a field to correct it</span>')
+          + '</div>'
+          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
+            + CLIENT_FIELDS.map(function(f){ return clientField(rec, f[0], f[1], ovr); }).join('')
+          + '</div>'
+        + '</div>'
+        + '<div style="display:flex;flex-direction:column;gap:14px">'
+          + miniList('Policies', d.policies || [], [['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status','chip'],['expiration_date','Expires','date'],['annualized_premium','Premium','money']], 'No policies on this client.')
+          + miniList('Cases', d.cases || [], [['case_number','Case #'],['title','Subject'],['status','Status','chip'],['priority','Priority','chip']], 'No cases.')
+          + miniList('Tasks', d.tasks || [], [['title','Task'],['status','Status','chip'],['due_at','Due','date']], 'No tasks.')
+          + miniList('Opportunities', d.opportunities || [], [['line_of_business','LOB'],['stage','Stage','chip'],['premium_estimate','Est.','money'],['carrier','Carrier']], 'No open opportunities.')
+        + '</div>'
+      + '</div>'
+    + '</div>';
+  }
+
+  function openClient(guid){
+    clientData = { loading:true }; clientEdit = {};
+    setState({ screen:'crm', crmView:'client', client:guid });
+    pull('/api/clients/'+encodeURIComponent(guid)).then(function(d){
+      clientData = (!d || d._error) ? { error:(d && d._error) || 'no response' } : d;
+      render();
+    });
+  }
+
+  function saveClientEdits(){
+    var guid = state.client, fields = Object.keys(clientEdit);
+    if (!guid || !fields.length) return;
+    var who = (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
+                                          : 'lamar@risksolutionsgroup.net';
+    // One override per field — each is its own named, reversible decision.
+    Promise.all(fields.map(function(f){
+      return fetch('/api/clients/'+encodeURIComponent(guid)+'/override', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ field_name:f, value:clientEdit[f], approved_by:who,
+                               reason:'corrected in the CRM' })
+      }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
+    })).then(function(errs){
+      var bad = errs.filter(Boolean);
+      clientEdit = {};
+      if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
+      openClient(guid);       // re-read so the saved values come back from the API
+    });
   }
 
   // A CRM sub-view: header, then a table of whatever the endpoint returned.
@@ -528,7 +651,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">No '+cfg.label.toLowerCase()+' in the book.</div>';
     } else {
       body = d.rows.slice(0,200).map(function(r){
-        return '<div class="rowh" style="'+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
+        // Clients open a 360. The others are still read-only lists.
+        var guid = (key === 'clients') ? (r.nowcerts_insured_guid || '') : '';
+        var open = guid ? ' data-client="'+esc(guid)+'" style="cursor:pointer;' : ' style="';
+        return '<div class="rowh"'+open+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
           + cfg.cols.map(function(c){ return crmCell(r, c); }).join('')
         + '</div>';
       }).join('');
@@ -584,7 +710,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="margin-top:auto;display:flex;align-items:center;gap:8px;padding:10px 9px 0;border-top:1px solid rgba(255,255,255,.08)"><span style="width:7px;height:7px;border-radius:50%;background:#3DDC84;display:inline-block"></span><div><div style="font-size:11px;color:#CFE3D6;font-weight:600">Supabase connected</div><div style="font-size:9.5px;color:#6E9179">Hermes mirrors · live</div></div></div>'
       + '</div>'
       + '<div style="flex:1;min-width:0;overflow:auto;padding:24px 26px">'
-        + (view !== 'workspace' ? crmTable(view)
+        + (view === 'client' ? renderClientDetail()
+          : view !== 'workspace' ? crmTable(view)
           : '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live Supabase model</div>'
             + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Agency workspace</h1>'
             + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Clients and Policies are read-only mirrors; Pipeline, Cases, and Tasks write back to Supabase. Renewals and Commissions have their own workspaces.</p>'
@@ -1016,6 +1143,24 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // ------------------------------------------------------------------
   // Event delegation
   // ------------------------------------------------------------------
+  document.getElementById('app').addEventListener('input', function(e){
+    var f = e.target && e.target.getAttribute && e.target.getAttribute('data-cfield');
+    if(!f) return;
+    var rec = (clientData && clientData.client) || {};
+    var original = rec[f] == null ? '' : String(rec[f]);
+    var wasDirty = Object.keys(clientEdit).length > 0;
+    if(e.target.value === original) delete clientEdit[f];
+    else clientEdit[f] = e.target.value;
+    // Re-render only when the Save button needs to appear or disappear —
+    // re-rendering per keystroke would blur the input mid-typing.
+    if((Object.keys(clientEdit).length > 0) !== wasDirty){
+      var id = e.target.getAttribute('data-cfield'), pos = e.target.selectionStart;
+      render();
+      var again = document.querySelector('[data-cfield="'+id+'"]');
+      if(again){ again.focus(); try{ again.setSelectionRange(pos, pos); }catch(err){} }
+    }
+  });
+
   document.getElementById('app').addEventListener('keydown', function(e){
     if(e.key==='Enter' && e.target && e.target.id==='aiInput'){
       e.preventDefault();
@@ -1024,11 +1169,18 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-client],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // CRM sub-view, either from its own rail or from a workspace card whose
     // target is written "crm:<view>".
+    if(el.hasAttribute('data-client')){
+      var c = el.getAttribute('data-client');
+      if(c === 'close'){ clientData = null; clientEdit = {}; setState({ crmView:'clients', client:null }); }
+      else if(c === 'save'){ saveClientEdits(); }
+      else { openClient(c); }
+      return;
+    }
     if(el.hasAttribute('data-aichip')){
       askHermes(el.getAttribute('data-aichip'));
       return;
