@@ -498,16 +498,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · overdue</span>';
     return esc(txt);
   }
-  // NowCerts GUIDs are read-only machine keys. They are how a record is
-  // addressed and corrected, never something to show or edit — a raw GUID in a
-  // cell is noise at best and an invitation to "fix" it at worst. Nothing
-  // renders one; this makes that a rule rather than a coincidence.
-  var GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  function isId(v){ return typeof v === 'string' && GUID_RE.test(v.trim()); }
-
+  // NowCerts GUIDs are read-only: fine to show — they are how you match a record
+  // against the AMS — but never editable. The enforcement is the override
+  // allowlist, which carries no identifier, not the renderer.
   function crmCell(r, c){
     var v = r[c[0]], fmt = c[2], txt;
-    if (!fmt && isId(v)) return '<span style="font-size:12.5px;color:#C4C7CC">—</span>';
     if(fmt==='money') txt = money(v);
     else if(fmt==='chip') txt = chipHtml(v);
     else if(fmt==='date') txt = dueHtml(v);
