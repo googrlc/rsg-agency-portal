@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RSG Agency Portal</title>
+<!-- Installable web app. Requires a secure context, which the tailnet HTTPS URL
+     (https://hermes-gretch.tail1cbc83.ts.net:8447) provides; reaching the portal
+     over plain http will still work but will not offer to install. -->
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#16233F">
+<meta name="application-name" content="RSG Portal">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="RSG Portal">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1050,6 +1061,17 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   render();
   fetchLive();
 })();
+</script>
+<script>
+// Register the shell service worker. Wrapped and failure-tolerant on purpose:
+// registration throws on an insecure origin, and this portal is also reachable
+// over plain http on the tailnet IP. A thrown error there would surface in the
+// console on every load without changing anything the user can act on.
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('/sw.js').catch(function(){ /* non-fatal */ });
+  });
+}
 </script>
 </body>
 </html>
