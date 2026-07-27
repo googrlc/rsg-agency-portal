@@ -222,9 +222,13 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   };
   var crmData = {};      // view key -> rows | {_error}
   var clientData = null; // the open client's 360: record, policies, cases, tasks
-  var clientEdit = {};   // field -> in-progress value, before it is saved
   var policyOpen = null; // policy_guid of the policy being corrected, if any
-  var policyEdit = {};   // field -> in-progress value, before it is saved
+  var workOpen = null;   // {kind:'task'|'case', id} — the work item being edited
+  var renewalOpen = null;// id of the renewal whose detail is being edited
+  // One in-progress buffer per editable surface: field -> typed value, before it
+  // is saved. Several can be open at once (a client, one of their policies, and
+  // a task on the same screen), so they are kept apart rather than pooled.
+  var edits = { client:{}, policy:{}, work:{}, renewal:{} };
 
   // Renewals
   var renewalKpis = [
@@ -526,20 +530,58 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['address','Address'], ['city','City'], ['state','State'], ['zip','ZIP'], ['notes','Notes'],
   ];
 
-  function clientField(rec, key, label, overridden){
-    var pending = Object.prototype.hasOwnProperty.call(clientEdit, key);
-    var val = pending ? clientEdit[key] : (rec[key] == null ? '' : String(rec[key]));
-    var was = overridden[key];
-    return '<div style="display:flex;flex-direction:column;gap:4px">'
+  // One field renderer for every editable surface. `kind` names the buffer the
+  // field writes into ('client', 'policy', 'work', 'renewal'); a field carries
+  // its own kind so a single input handler can serve all of them.
+  //
+  // opts: { overridden, options (a select), wide, area (a textarea), placeholder }
+  function editField(kind, rec, key, label, opts){
+    opts = opts || {};
+    var buf = edits[kind];
+    var ovr = opts.overridden || {};
+    var pending = Object.prototype.hasOwnProperty.call(buf, key);
+    var corrected = Object.prototype.hasOwnProperty.call(ovr, key);
+    var val = pending ? buf[key] : (rec[key] == null ? '' : String(rec[key]));
+    var id = kind + ':' + key;
+    var box = 'border:1px solid '+(pending?'#B9822A':'#E6E6E2')+';border-radius:9px;padding:8px 11px;font:inherit;'
+            + 'font-size:13px;color:#25282E;width:100%;box-sizing:border-box;background:'+(pending?'#FFFBF2':'#fff');
+
+    var control;
+    if (opts.options) {
+      control = '<select data-efield="'+id+'" style="'+box+'">'
+        + opts.options.map(function(o){
+            var v = (typeof o === 'string') ? o : o[0], t = (typeof o === 'string') ? o : o[1];
+            return '<option value="'+esc(v)+'"'+(String(val)===String(v)?' selected':'')+'>'+esc(t)+'</option>';
+          }).join('')
+        + '</select>';
+    } else if (opts.area) {
+      control = '<textarea data-efield="'+id+'" rows="4" style="'+box+';resize:vertical;line-height:1.45">'+esc(val)+'</textarea>';
+    } else {
+      control = '<input data-efield="'+id+'" value="'+esc(val)+'"'
+        + (opts.placeholder ? ' placeholder="'+esc(opts.placeholder)+'"' : '')
+        + ' style="'+box+'"/>';
+    }
+
+    return '<div style="display:flex;flex-direction:column;gap:4px;min-width:0'+(opts.wide?';grid-column:1/-1':'')+'">'
       + '<label style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+label
-        + (Object.prototype.hasOwnProperty.call(overridden,key)
-            ? ' <span title="Corrected in the portal. NowCerts still shows the old value." style="color:#B9822A">· corrected</span>' : '')
+        + (corrected ? ' <span title="Corrected in the portal. NowCerts still shows the old value." style="color:#B9822A">· corrected</span>' : '')
       + '</label>'
-      + '<input data-cfield="'+key+'" value="'+esc(val)+'" '
-        + 'style="border:1px solid '+(pending?'#B9822A':'#E6E6E2')+';border-radius:9px;padding:8px 11px;font:inherit;'
-        + 'font-size:13px;color:#25282E;background:'+(pending?'#FFFBF2':'#fff')+'"/>'
-      + (Object.prototype.hasOwnProperty.call(overridden,key)
-          ? '<span style="font-size:11px;color:#9A9EA6">AMS: '+esc(was==null?'(blank)':String(was))+'</span>' : '')
+      + control
+      + (corrected
+          ? '<span style="font-size:11px;color:#9A9EA6">AMS: '+esc(ovr[key]==null?'(blank)':String(ovr[key]))+'</span>' : '')
+    + '</div>';
+  }
+
+  // Save / Discard / close, rendered the same way on every card.
+  function cardActions(kind, extra){
+    var dirty = Object.keys(edits[kind]).length;
+    return '<div style="display:flex;align-items:center;gap:10px">'
+      + (extra || '')
+      + (dirty
+          ? '<span data-edit="'+kind+':discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>'
+            + '<span data-edit="'+kind+':save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+dirty+' change'+(dirty===1?'':'s')+'</span>'
+          : '<span style="font-size:11.5px;color:#9A9EA6">Edit a field to change it</span>')
+      + '<span data-edit="'+kind+':close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
     + '</div>';
   }
 
@@ -581,22 +623,6 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['policy_guid','NowCerts policy ID', true],
   ];
 
-  function policyField(rec, key, label, overridden){
-    var pending = Object.prototype.hasOwnProperty.call(policyEdit, key);
-    var val = pending ? policyEdit[key] : (rec[key] == null ? '' : String(rec[key]));
-    var corrected = Object.prototype.hasOwnProperty.call(overridden, key);
-    return '<div style="display:flex;flex-direction:column;gap:4px">'
-      + '<label style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+label
-        + (corrected ? ' <span title="Corrected in the portal. NowCerts still shows the old value." style="color:#B9822A">· corrected</span>' : '')
-      + '</label>'
-      + '<input data-pfield="'+key+'" value="'+esc(val)+'" '
-        + 'style="border:1px solid '+(pending?'#B9822A':'#E6E6E2')+';border-radius:9px;padding:8px 11px;font:inherit;'
-        + 'font-size:13px;color:#25282E;background:'+(pending?'#FFFBF2':'#fff')+'"/>'
-      + (corrected
-          ? '<span style="font-size:11px;color:#9A9EA6">AMS: '+esc(overridden[key]==null?'(blank)':String(overridden[key]))+'</span>' : '')
-    + '</div>';
-  }
-
   // An identifier, rendered as what it is: readable, copyable, not an input.
   // A GUID gets the full row — a truncated identifier you have to hover to read
   // is the reason people go back to opening the AMS to check they have the right
@@ -616,26 +642,98 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var rec = null;
     for (var i=0;i<list.length;i++) if (list[i].policy_guid === policyOpen) rec = list[i];
     if (!rec) return '';
-    var ovr = rec._overridden || {}, dirty = Object.keys(policyEdit).length;
+    var ovr = rec._overridden || {};
 
     return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
       + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
         + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Policy '
           + esc(rec.policy_number || '—')+'</span>'
-        + '<div style="display:flex;align-items:center;gap:10px">'
-          + (dirty
-              ? '<span data-policy="discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>'
-                + '<span data-policy="save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+dirty+' change'+(dirty===1?'':'s')+'</span>'
-              : '<span style="font-size:11.5px;color:#9A9EA6">Edit a field to correct it</span>')
-          + '<span data-policy="close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
-        + '</div>'
+        + cardActions('policy')
       + '</div>'
       + '<div style="font-size:11px;color:#9A9EA6;margin-bottom:13px">Identifiers come from NowCerts and are read-only.</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:11px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px;margin-bottom:14px">'
         + POLICY_IDS.map(function(f){ return readonlyId(f[1], rec[f[0]], f[2]); }).join('')
       + '</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
-        + POLICY_FIELDS.map(function(f){ return policyField(rec, f[0], f[1], ovr); }).join('')
+        + POLICY_FIELDS.map(function(f){ return editField('policy', rec, f[0], f[1], {overridden:ovr}); }).join('')
+      + '</div>'
+    + '</div>';
+  }
+
+  // ---- Cases and tasks ------------------------------------------------------
+  // These are the CRM's own records, not a mirror of NowCerts, so an edit is a
+  // real write — not an override. Completing and deleting live on the same card
+  // as the fields: a queue you can only add to is a queue nobody trusts.
+  var TASK_STATUSES = ['not_started','in_progress','waiting','completed','cancelled'];
+  var PRIORITIES = ['low','medium','high','urgent'];
+  var TASK_FIELDS = [
+    ['title','Title', {wide:true}], ['status','Status', {options:TASK_STATUSES}],
+    ['priority','Priority', {options:PRIORITIES}],
+    ['assigned_to_email','Assigned to'], ['due_at','Due', {placeholder:'YYYY-MM-DD'}],
+    ['description','Notes', {wide:true, area:true}],
+  ];
+  var CASE_FIELDS = [
+    ['title','Title', {wide:true}], ['case_type','Type'],
+    ['priority','Priority', {options:PRIORITIES}],
+    ['owner_email','Owner'], ['due_at','Due', {placeholder:'YYYY-MM-DD'}],
+    ['description','Notes', {wide:true, area:true}],
+  ];
+
+  // Whichever list the open work item came from — the client 360 or the CRM
+  // table. One lookup so the card does not care which screen opened it.
+  //
+  // The list for the view you are ON is searched first. Both can hold the same
+  // record, and only one of them was just re-read: a client 360 left loaded from
+  // earlier will happily answer with the pre-save copy, which is how a card ends
+  // up showing "open" next to a row that says "closed".
+  function workRecord(){
+    if (!workOpen) return null;
+    var key = workOpen.kind === 'task' ? 'tasks' : 'cases';
+    var fromClient = clientData ? clientData[key] : null;
+    var fromTable = (crmData[key] || {}).rows;
+    var pools = (state.crmView === 'client') ? [fromClient, fromTable] : [fromTable, fromClient];
+    for (var p=0;p<pools.length;p++){
+      var rows = pools[p] || [];
+      for (var i=0;i<rows.length;i++) if (String(rows[i].id) === String(workOpen.id)) return rows[i];
+    }
+    return null;
+  }
+
+  function renderWorkCard(){
+    var rec = workRecord();
+    if (!rec) return '';
+    var isTask = workOpen.kind === 'task';
+    var fields = isTask ? TASK_FIELDS : CASE_FIELDS;
+    var closed = isTask
+      ? (rec.status === 'completed' || rec.status === 'cancelled')
+      : (rec.status === 'closed');
+
+    var btn = 'font-size:12px;font-weight:600;border-radius:8px;padding:7px 13px;cursor:pointer;';
+    var extra = '';
+    if (!closed) {
+      extra += '<span data-edit="work:finish" style="'+btn+'color:#2F6B4F;background:#EAF1EC">'
+             + (isTask ? 'Complete' : 'Close case') + '</span>';
+    }
+    extra += '<span data-edit="work:delete" style="'+btn+'color:#B4231F;background:#FBE9E7">Delete</span>';
+
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">'
+          + (isTask ? 'Task' : 'Case ' + esc(rec.case_number || '')) + '</span>'
+        + cardActions('work', extra)
+      + '</div>'
+      + '<div style="font-size:11px;color:#9A9EA6;margin-bottom:13px">'
+        + (isTask
+            ? 'Status is a field here — completing is the same write, one click.'
+            : 'Closing a case records a resolution and pushes the summary to NowCerts, so it is an action rather than a field.')
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:11px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px;margin-bottom:14px">'
+        + readonlyId(isTask ? 'Task ID' : 'Case ID', rec.id, true)
+        + (isTask ? readonlyId('Case', rec.case_id || '—') : readonlyId('Case number', rec.case_number))
+        + readonlyId('Status', rec.status)
+      + '</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
+        + fields.map(function(f){ return editField('work', rec, f[0], f[1], f[2]); }).join('')
       + '</div>'
     + '</div>';
   }
@@ -652,7 +750,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div data-client="close" style="margin-top:14px;font-size:12.5px;color:#2563EB;cursor:pointer">‹ Back to clients</div></div></div>';
     }
     var rec = d.client, ovr = rec._overridden || {};
-    var dirty = Object.keys(clientEdit).length;
+    var dirty = Object.keys(edits.client).length;
 
     return '<div style="position:absolute;inset:0;overflow:auto;padding:22px 26px">'
       + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">'
@@ -671,24 +769,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
           + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">'
             + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Details</span>'
-            + '<div style="display:flex;align-items:center;gap:10px">'
-              + (dirty
-                  ? '<span data-client="discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>'
-                    + '<span data-client="save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+dirty+' change'+(dirty===1?'':'s')+'</span>'
-                  : '<span style="font-size:11.5px;color:#9A9EA6">Edit a field to correct it</span>')
-              + '<span data-client="close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
-            + '</div>'
+            + cardActions('client')
           + '</div>'
           + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
-            + CLIENT_FIELDS.map(function(f){ return clientField(rec, f[0], f[1], ovr); }).join('')
+            + CLIENT_FIELDS.map(function(f){ return editField('client', rec, f[0], f[1], {overridden:ovr}); }).join('')
           + '</div>'
         + '</div>'
         + '<div style="display:flex;flex-direction:column;gap:14px">'
           + renderPolicyCard()
+          + renderWorkCard()
           + miniList('Policies', d.policies || [], [['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status','chip'],['expiration_date','Expires','date'],['annualized_premium','Premium','money']], 'No policies on this client.',
               function(p){ return p.policy_guid ? 'data-policy="'+esc(p.policy_guid)+'"' : ''; })
-          + miniList('Cases', d.cases || [], [['case_number','Case #'],['title','Subject'],['status','Status','chip'],['priority','Priority','chip']], 'No cases.')
-          + miniList('Tasks', d.tasks || [], [['title','Task'],['status','Status','chip'],['due_at','Due','date']], 'No tasks.')
+          + miniList('Cases', d.cases || [], [['case_number','Case #'],['title','Subject'],['status','Status','chip'],['priority','Priority','chip']], 'No cases.',
+              function(k){ return k.id ? 'data-work="case:'+esc(k.id)+'"' : ''; })
+          + miniList('Tasks', d.tasks || [], [['title','Task'],['status','Status','chip'],['due_at','Due','date']], 'No tasks.',
+              function(t){ return t.id ? 'data-work="task:'+esc(t.id)+'"' : ''; })
           + miniList('Opportunities', d.opportunities || [], [['line_of_business','LOB'],['stage','Stage','chip'],['premium_estimate','Est.','money'],['carrier','Carrier']], 'No open opportunities.')
         + '</div>'
       + '</div>'
@@ -696,9 +791,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   function openClient(guid, keepPolicy){
-    clientData = { loading:true }; clientEdit = {};
+    clientData = { loading:true }; edits.client = {};
     if (!keepPolicy) { policyOpen = null; }
-    policyEdit = {};
+    edits.policy = {};
     setState({ screen:'crm', crmView:'client', client:guid });
     pull('/api/clients/'+encodeURIComponent(guid)).then(function(d){
       clientData = (!d || d._error) ? { error:(d && d._error) || 'no response' } : d;
@@ -714,40 +809,40 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   function closePolicy(force){
-    if (!force && !unsavedOk(Object.keys(policyEdit).length)) return false;
-    policyOpen = null; policyEdit = {}; render();
+    if (!force && !unsavedOk(Object.keys(edits.policy).length)) return false;
+    policyOpen = null; edits.policy = {}; render();
     return true;
   }
 
   function closeClient(){
     if (policyOpen) return closePolicy(false);
-    if (!unsavedOk(Object.keys(clientEdit).length)) return false;
-    clientData = null; clientEdit = {}; policyOpen = null; policyEdit = {};
+    if (!unsavedOk(Object.keys(edits.client).length)) return false;
+    clientData = null; edits.client = {}; policyOpen = null; edits.policy = {};
     setState({ crmView:'clients', client:null });
     return true;
   }
 
   function savePolicyEdits(){
-    var guid = policyOpen, fields = Object.keys(policyEdit);
+    var guid = policyOpen, fields = Object.keys(edits.policy);
     if (!guid || !fields.length) return;
     var who = (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
                                           : 'lamar@risksolutionsgroup.net';
     Promise.all(fields.map(function(f){
       return fetch('/api/policies/'+encodeURIComponent(guid)+'/override', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ field_name:f, value:policyEdit[f], approved_by:who,
+        body: JSON.stringify({ field_name:f, value:edits.policy[f], approved_by:who,
                                reason:'corrected in the CRM' })
       }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
     })).then(function(errs){
       var bad = errs.filter(Boolean);
-      policyEdit = {};
+      edits.policy = {};
       if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
       openClient(state.client, true);   // re-read; keep the policy open
     });
   }
 
   function saveClientEdits(){
-    var guid = state.client, fields = Object.keys(clientEdit);
+    var guid = state.client, fields = Object.keys(edits.client);
     if (!guid || !fields.length) return;
     var who = (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
                                           : 'lamar@risksolutionsgroup.net';
@@ -755,14 +850,159 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     Promise.all(fields.map(function(f){
       return fetch('/api/clients/'+encodeURIComponent(guid)+'/override', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ field_name:f, value:clientEdit[f], approved_by:who,
+        body: JSON.stringify({ field_name:f, value:edits.client[f], approved_by:who,
                                reason:'corrected in the CRM' })
       }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
     })).then(function(errs){
       var bad = errs.filter(Boolean);
-      clientEdit = {};
+      edits.client = {};
       if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
       openClient(guid, true);  // re-read so the saved values come back from the API
+    });
+  }
+
+  function actingAs(){
+    return (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
+                                       : 'lamar@risksolutionsgroup.net';
+  }
+
+  // Re-read whichever list the open work item came from, so a saved change is
+  // shown as the API returned it rather than as it was typed.
+  function reloadWorkFor(item){
+    if (state.crmView === 'client' && state.client) { openClient(state.client, true); return; }
+    loadCrmView(item && item.kind === 'task' ? 'tasks' : 'cases', true);
+  }
+  function reloadWork(){ reloadWorkFor(workOpen); }
+
+  function closeWork(){
+    if (!workOpen) return true;
+    if (!unsavedOk(Object.keys(edits.work).length)) return false;
+    workOpen = null; edits.work = {}; render();
+    return true;
+  }
+
+  function saveWorkEdits(){
+    var rec = workRecord(), fields = Object.keys(edits.work);
+    if (!rec || !fields.length) return;
+    var body = {};
+    fields.forEach(function(f){ body[f] = edits.work[f] === '' ? null : edits.work[f]; });
+    fetch('/api/'+(workOpen.kind === 'task' ? 'tasks' : 'cases')+'/'+encodeURIComponent(rec.id), {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That change was refused:\n' + JSON.stringify(err)); return; }
+      edits.work = {};
+      reloadWork();
+    });
+  }
+
+  // Completing a task is a status write. Closing a case is not: it checks the
+  // required tasks, records a resolution and pushes a summary to NowCerts — so
+  // it asks for the resolution rather than inventing one.
+  function finishWork(){
+    var rec = workRecord();
+    if (!rec) return;
+    var isTask = workOpen.kind === 'task';
+    var url, body;
+    if (isTask) {
+      if (!confirm('Mark "'+(rec.title||'this task')+'" complete?')) return;
+      url = '/api/tasks/'+encodeURIComponent(rec.id)+'/complete';
+      body = {};
+    } else {
+      var resolution = prompt('How was this case resolved? (goes to NowCerts)');
+      if (!resolution) return;
+      url = '/api/cases/'+encodeURIComponent(rec.id)+'/close';
+      body = { resolution: resolution, resolved_by_email: actingAs() };
+    }
+    fetch(url, { method:'POST', headers:{'Content-Type':'application/json'},
+                 body: JSON.stringify(body) })
+      .then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
+      .then(function(res){
+        if (!res.ok) {
+          var d = res.j && res.j.detail;
+          // The backend answers a blocked close with the tasks that are blocking
+          // it, which is the only useful thing to show here.
+          if (d && d.blocking) {
+            alert('Cannot close ' + (d.case_number||'this case') + ' yet:\n\n'
+              + d.blocking.map(function(b){ return '· ' + b.title + ' (' + b.status + ')'; }).join('\n')
+              + '\n\n' + (d.hint || ''));
+          } else {
+            alert('That did not go through:\n' + JSON.stringify(d || res.j));
+          }
+          return;
+        }
+        edits.work = {};
+        // A completed task drops out of the open-task queue, so the card would
+        // be left pointing at a row that is no longer in the list. Completing it
+        // is also the end of working it — close the card and show the list.
+        if (isTask) { var k = workOpen; workOpen = null; reloadWorkFor(k); return; }
+        reloadWork();
+      });
+  }
+
+  function deleteWork(){
+    var rec = workRecord();
+    if (!rec) return;
+    var isTask = workOpen.kind === 'task';
+    var what = isTask ? 'task' : 'case';
+    var warn = 'Delete this '+what+'?\n\n"'+(rec.title || rec.case_number || rec.id)+'"'
+      + (isTask ? '' : '\n\nIts tasks, timeline and document links go with it. The documents themselves stay in Nextcloud.')
+      + '\n\nThis cannot be undone.';
+    if (!confirm(warn)) return;
+    fetch('/api/'+(isTask?'tasks':'cases')+'/'+encodeURIComponent(rec.id), {
+      method:'DELETE', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ deleted_by: actingAs(), reason:'deleted from the CRM' })
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That '+what+' was not deleted:\n' + JSON.stringify(err)); return; }
+      var kind = workOpen.kind;
+      workOpen = null; edits.work = {};
+      if (state.crmView === 'client' && state.client) openClient(state.client, true);
+      else loadCrmView(kind === 'task' ? 'tasks' : 'cases', true);
+    });
+  }
+
+  // ---- Renewal detail -------------------------------------------------------
+  // Both premiums are editable: the expiring one is often wrong in the mirror,
+  // and the renewal one does not exist until a carrier quotes it. The change
+  // percentage is not a field — it is computed from the two, so it follows.
+  var RENEWAL_RISK = ['SAFE','AT_RISK','CRITICAL','RENEWED','LAPSED'];
+  var RENEWAL_FIELDS = [
+    ['premium_current','Premium (current)'], ['premium_renewal','Premium (renewal)'],
+    ['risk_status','Risk', {options:RENEWAL_RISK}],
+    ['last_contact_date','Last contact', {placeholder:'YYYY-MM-DD'}],
+    ['ai_strategy_notes','Strategy note', {wide:true, area:true}],
+  ];
+
+  function saveRenewalEdits(){
+    var rec = selRenewal, fields = Object.keys(edits.renewal);
+    if (!rec || !rec.id || !fields.length) return;
+    var body = {};
+    fields.forEach(function(f){
+      var v = edits.renewal[f];
+      if (v === '') { body[f] = null; return; }
+      body[f] = (f.indexOf('premium') === 0) ? parseFloat(String(v).replace(/[^0-9.\-]/g,'')) : v;
+    });
+    fetch('/api/renewals/'+encodeURIComponent(rec.id), {
+      method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That change was refused:\n' + JSON.stringify(err)); return; }
+      edits.renewal = {};
+      // Re-read the cockpit so the recomputed change percentage comes from the
+      // database rather than being guessed here.
+      pull('/api/renewals').then(function(d){
+        if (applyRenewals(d)) {
+          for (var i=0;i<renewalRows.length;i++){
+            var raw = renewalRows[i]._raw;
+            if (raw && String(raw.id) === String(rec.id)) selRenewal = raw;
+          }
+        }
+        render();
+      });
     });
   }
 
@@ -784,20 +1024,29 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">No '+cfg.label.toLowerCase()+' in the book.</div>';
     } else {
       body = d.rows.slice(0,200).map(function(r){
-        // Clients open a 360. The others are still read-only lists.
-        var guid = (key === 'clients') ? (r.nowcerts_insured_guid || '') : '';
-        var open = guid ? ' data-client="'+esc(guid)+'" style="cursor:pointer;' : ' style="';
+        // Clients open a 360; cases and tasks open the card that edits them.
+        // The rest are still read-only lists.
+        var open = ' style="';
+        if (key === 'clients' && r.nowcerts_insured_guid) {
+          open = ' data-client="'+esc(r.nowcerts_insured_guid)+'" style="cursor:pointer;';
+        } else if ((key === 'cases' || key === 'tasks') && r.id) {
+          open = ' data-work="'+(key === 'tasks' ? 'task' : 'case')+':'+esc(r.id)+'" style="cursor:pointer;';
+        }
         return '<div class="rowh"'+open+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
           + cfg.cols.map(function(c){ return crmCell(r, c); }).join('')
         + '</div>';
       }).join('');
     }
     var count = d.rows ? d.rows.length : null;
+    var card = (workOpen && (key === 'cases' || key === 'tasks')
+                && workOpen.kind === (key === 'tasks' ? 'task' : 'case'))
+      ? '<div style="margin-bottom:16px">' + renderWorkCard() + '</div>' : '';
     return '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live from Hermes</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">'+cfg.label+'</h1>'
       + '<p style="font-size:12.5px;color:#787C84;margin:0 0 18px">'
         + (count!=null ? count.toLocaleString('en-US')+' record'+(count===1?'':'s')+(count>200?' · showing first 200':'') : '&nbsp;')
       + '</p>'
+      + card
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
         + '<div style="'+grid+'padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+head+'</div>'
         + body
@@ -909,17 +1158,20 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
     var facts;
     if(live){
-      var lf = [
+      // What the desk works: the premiums, the risk call, when we last spoke.
+      // Policy number, expiration and the change percentage are not fields —
+      // the first two identify the renewal, the third is computed from the two
+      // premiums, so it moves when they do.
+      var readOnly = [
         { label:'Policy #', value:live.policy_number||'—' },
-        { label:'Risk', value:(renewalStatusMap[live.risk_status]||['—'])[0] },
-        { label:'Premium (current)', value:money(live.premium_current) },
-        { label:'Premium (renewal)', value:live.premium_renewal!=null?money(live.premium_renewal):'—' },
         { label:'Expiration', value:live.expiration_date||'—' },
         { label:'Renews in', value:live.days_until!=null?(live.days_until+' days'):'—' },
-        { label:'Change', value:live.increase_percentage!=null?((live.increase_percentage>0?'+':'')+live.increase_percentage+'%'):'—' },
-        { label:'Last contact', value:live.last_contact_date||'—' },
+        { label:'Change', value:live.increase_percentage!=null?((live.increase_percentage>0?'+':'')+Number(live.increase_percentage).toFixed(1)+'%'):'—' },
       ];
-      facts = lf.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
+      facts = '<div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:11px 24px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px">'
+        + readOnly.map(function(f){ return '<div><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('')
+        + '</div>'
+        + RENEWAL_FIELDS.map(function(f){ return editField('renewal', live, f[0], f[1], f[2]); }).join('');
     } else {
       facts = detailFacts.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
     }
@@ -948,7 +1200,16 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="padding:24px 26px 40px;display:flex;gap:20px;align-items:flex-start;max-width:1000px">'
         + '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:16px">'
           + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
-            + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Policy details</span><span style="font-size:10.5px;color:#96999F;display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:'+(live?'#3DDC84':'#B9822A')+'"></span>'+(live?'Live · Renewals Cockpit':'Sample data')+'</span></div>'
+            + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Renewal details</span>'
+              + (live
+                  ? '<div style="display:flex;align-items:center;gap:10px">'
+                    + (Object.keys(edits.renewal).length
+                        ? '<span data-edit="renewal:discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>'
+                          + '<span data-edit="renewal:save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+Object.keys(edits.renewal).length+' change'+(Object.keys(edits.renewal).length===1?'':'s')+'</span>'
+                        : '<span style="font-size:10.5px;color:#96999F;display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#3DDC84"></span>Live · Renewals Cockpit</span>')
+                    + '</div>'
+                  : '<span style="font-size:10.5px;color:#96999F;display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#B9822A"></span>Sample data</span>')
+            + '</div>'
             + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px">'+facts+'</div>'
           + '</div>'
           + covsCard
@@ -974,7 +1235,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       var cb = r.catBg || (cCat[r.cat]||['#2F6B4F','#EAF1EC'])[1];
       var o = (''+r.status).toLowerCase()==='overdue';
       var statusColor = r.statusColor || (o?'#B4231F':'#3D4149'), statusWeight = r.statusWeight || (o?700:500);
-      return '<div class="tile rowh" data-casedetail="open" style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.subj+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+cc+';background:'+cb+'">'+r.cat+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.tasks+'</span><span style="font-size:12.5px;color:#6B7078">'+r.age+'</span><span style="font-size:12.5px;font-weight:'+statusWeight+';color:'+statusColor+'">'+r.status+'</span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
+      // A live row opens the card that actually edits it, over in the CRM. The
+      // overlay below only ever had placeholder content — it never learned which
+      // case was clicked, so it showed the same empty shell for every row.
+      var openAttr = r.id ? ' data-caseopen="'+esc(r.id)+'"' : ' data-casedetail="open"';
+      return '<div class="tile rowh"'+openAttr+' style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.subj+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+cc+';background:'+cb+'">'+r.cat+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.tasks+'</span><span style="font-size:12.5px;color:#6B7078">'+r.age+'</span><span style="font-size:12.5px;font-weight:'+statusWeight+';color:'+statusColor+'">'+r.status+'</span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
     }).join('');
 
     var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
@@ -1279,23 +1544,31 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // ------------------------------------------------------------------
   // Event delegation
   // ------------------------------------------------------------------
-  // Client fields and policy fields edit identically; only which record they
-  // compare against and which buffer they land in differs.
-  function openPolicyRecord(){
-    var list = (clientData && clientData.policies) || [];
-    for (var i=0;i<list.length;i++) if (list[i].policy_guid === policyOpen) return list[i];
+  // Every editable surface writes through this one handler. A field's
+  // data-efield carries "<kind>:<field>", so the only thing that differs per
+  // surface is which record the typed value is compared against to decide
+  // whether it is still a change.
+  function editSubject(kind){
+    if (kind === 'client') return (clientData && clientData.client) || {};
+    if (kind === 'policy') {
+      var list = (clientData && clientData.policies) || [];
+      for (var i=0;i<list.length;i++) if (list[i].policy_guid === policyOpen) return list[i];
+      return {};
+    }
+    if (kind === 'work') return workRecord() || {};
+    if (kind === 'renewal') return selRenewal || {};
     return {};
   }
 
   document.getElementById('app').addEventListener('input', function(e){
     var t = e.target;
     if(!t || !t.getAttribute) return;
-    var attr = t.getAttribute('data-cfield') ? 'data-cfield' : (t.getAttribute('data-pfield') ? 'data-pfield' : null);
-    if(!attr) return;
-    var f = t.getAttribute(attr);
-    var isPolicy = attr === 'data-pfield';
-    var buf = isPolicy ? policyEdit : clientEdit;
-    var rec = isPolicy ? openPolicyRecord() : ((clientData && clientData.client) || {});
+    var id = t.getAttribute('data-efield');
+    if(!id) return;
+    var parts = id.split(':'), kind = parts[0], f = parts[1];
+    var buf = edits[kind];
+    if(!buf) return;
+    var rec = editSubject(kind);
     var original = rec[f] == null ? '' : String(rec[f]);
     var wasDirty = Object.keys(buf).length > 0;
     if(t.value === original) delete buf[f];
@@ -1305,7 +1578,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if((Object.keys(buf).length > 0) !== wasDirty){
       var pos = t.selectionStart;
       render();
-      var again = document.querySelector('['+attr+'="'+f+'"]');
+      var again = document.querySelector('[data-efield="'+id+'"]');
       if(again){ again.focus(); try{ again.setSelectionRange(pos, pos); }catch(err){} }
     }
   });
@@ -1317,37 +1590,75 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }
   });
 
-  // Escape closes the surface you are in — the policy card first, then the
-  // client. On document, not #app: after a save the focused input is gone and
-  // the keystroke would otherwise land on <body> and do nothing.
+  // Escape closes the innermost surface you are in, one at a time. On document,
+  // not #app: after a save the focused input is gone and the keystroke would
+  // otherwise land on <body> and do nothing.
   document.addEventListener('keydown', function(e){
     if(e.key !== 'Escape') return;
-    if(state.screen !== 'crm' || state.crmView !== 'client') return;
+    if(state.screen !== 'crm') return;
+    if(workOpen){ closeWork(); return; }
+    if(state.crmView !== 'client') return;
     if(policyOpen){ closePolicy(false); return; }
     if(state.client) closeClient();
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-client],[data-policy],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
+    // Card actions, written "<kind>:<action>" so one branch serves every card.
+    if(el.hasAttribute('data-edit')){
+      var ea = el.getAttribute('data-edit').split(':'), ek = ea[0], act = ea[1];
+      if(act === 'discard'){ edits[ek] = {}; render(); return; }
+      if(act === 'close'){
+        if(ek === 'client') closeClient();
+        else if(ek === 'policy') closePolicy(false);
+        else if(ek === 'work') closeWork();
+        else { edits[ek] = {}; render(); }
+        return;
+      }
+      if(act === 'save'){
+        if(ek === 'client') saveClientEdits();
+        else if(ek === 'policy') savePolicyEdits();
+        else if(ek === 'work') saveWorkEdits();
+        else if(ek === 'renewal') saveRenewalEdits();
+        return;
+      }
+      if(act === 'finish'){ finishWork(); return; }
+      if(act === 'delete'){ deleteWork(); return; }
+      return;
+    }
+    // A row on the Cases screen: hand it to the CRM's case card, which is the
+    // one surface that can actually edit, close or delete it.
+    if(el.hasAttribute('data-caseopen')){
+      if(!closeWork()) return;
+      workOpen = { kind:'case', id: el.getAttribute('data-caseopen') };
+      loadCrmView('cases');
+      setState({ screen:'crm', crmView:'cases', caseDetail:false, aiOpen:false });
+      return;
+    }
+    // A case or task row: "case:<id>" / "task:<id>".
+    if(el.hasAttribute('data-work')){
+      var w = el.getAttribute('data-work').split(':');
+      var same = workOpen && workOpen.kind === w[0] && String(workOpen.id) === w[1];
+      if(same) return;
+      if(!closeWork()) return;   // asks about unsaved edits on the previous one
+      workOpen = { kind:w[0], id:w[1] };
+      render();
+      return;
+    }
     // CRM sub-view, either from its own rail or from a workspace card whose
     // target is written "crm:<view>".
     if(el.hasAttribute('data-client')){
       var c = el.getAttribute('data-client');
       if(c === 'close'){ closeClient(); }
-      else if(c === 'discard'){ clientEdit = {}; render(); }
-      else if(c === 'save'){ saveClientEdits(); }
       else { openClient(c); }
       return;
     }
     if(el.hasAttribute('data-policy')){
       var p = el.getAttribute('data-policy');
-      if(p === 'close'){ closePolicy(false); }
-      else if(p === 'discard'){ policyEdit = {}; render(); }
-      else if(p === 'save'){ savePolicyEdits(); }
       // Switching to a different policy is a close, so it asks about unsaved work.
-      else if(p !== policyOpen && closePolicy(false)){ policyOpen = p; render(); }
+      if(p !== policyOpen && closePolicy(false)){ policyOpen = p; render(); }
       return;
     }
     if(el.hasAttribute('data-aichip')){
@@ -1547,7 +1858,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       var due = r.due_at ? new Date(r.due_at).getTime() : null;
       var overdue = raw.toLowerCase().indexOf('overdue')>=0 || (raw.toLowerCase()==='open' && due!=null && due < Date.now());
       var status = overdue ? 'Overdue' : (raw.charAt(0).toUpperCase()+raw.slice(1));
-      return { subj:(r.title||r.subject||r.name||'Case'), client:(r.insured_name||r.client||r.client_name||'—'),
+      return { id:r.id, subj:(r.title||r.subject||r.name||'Case'), client:(r.insured_name||r.client||r.client_name||'—'),
                cat:cm[0], catColor:cm[1], catBg:cm[2],
                tasks:'—',
                age:daysAgo(r.opened_at||r.created_at), status:status,
@@ -1627,9 +1938,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   // ---- CRM sub-views (Clients / Policies / Pipeline / Leads) ----------------
-  function loadCrmView(key){
+  // `force` re-reads a view that is already loaded — what a save or a delete
+  // needs, so the list shows what the API returned rather than what was typed.
+  function loadCrmView(key, force){
     var cfg = CRM_VIEWS[key];
-    if(!cfg || !cfg.endpoint || crmData[key]) return;
+    if(!cfg || !cfg.endpoint || (crmData[key] && !force)) return;
     crmData[key] = { loading:true };
     render();
     pull(cfg.endpoint).then(function(d){
