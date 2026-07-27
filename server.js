@@ -64,7 +64,8 @@ const ROUTES = {
   '/api/workspace-stats': '/api/workspace-stats',
   '/api/clients':     '/api/clients',
   '/api/policies':    '/api/policies',
-  '/api/pipeline':    '/api/opportunities'
+  '/api/pipeline':    '/api/opportunities',
+  '/api/quotes':      '/api/quotes'
 };
 
 // Leads reads NowCerts live and is the slowest thing the backend exposes; it gets

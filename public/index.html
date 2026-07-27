@@ -82,6 +82,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var NEXTCLOUD_BASE = 'https://nextcloud-x6wle-u69864.vm.elestio.app';
   var STORAGE_EMBED = NEXTCLOUD_BASE + '/apps/files/';
   var TALK_EMBED = NEXTCLOUD_BASE + '/apps/spreed/';
+  // Deck — the shared boards. Same origin and same framing allowance as Files
+  // and Talk, so it embeds on the tailnet https origin exactly like they do.
+  var DECK_EMBED = NEXTCLOUD_BASE + '/apps/deck/';
   // True when the portal itself is served from the tailnet HTTPS origin that
   // NextCloud allows to frame it. Over IP:3400 the NextCloud panes are blocked.
   function onTailnetHttps(){ try { return location.protocol==='https:' && /\.ts\.net$/i.test(location.hostname); } catch(e){ return false; } }
@@ -148,6 +151,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     { key:'finance',  mono:'CT', railLabel:'Finance',  name:'Finance',       accent:'#B9822A', tint:'#F7EEDB', desc:'Commissions — expected vs received',      stat:'—',     stat2:'—' },
     { key:'storage',  mono:'ST', railLabel:'Storage',  name:'Storage',       accent:'#4B77BE', tint:'#E9EEF7', desc:'NextCloud files & shared documents',      stat:'NextCloud',       stat2:'synced' },
     { key:'team',     mono:'TM', railLabel:'Team',     name:'Team Chat',     accent:'#0F7B6C', tint:'#E4F1EF', desc:'Chat, questions & document sharing',      stat:'—',               stat2:'channels' },
+    { key:'deck',     mono:'DK', railLabel:'Deck',     name:'Deck',          accent:'#6D28D9', tint:'#EDE7FB', desc:'Shared boards — cards, lists & due dates', stat:'—',               stat2:'NextCloud Deck' },
     { key:'sops',     mono:'SO', railLabel:'SOPs',     name:'SOPs',          accent:'#8E3B5B', tint:'#F5E9EE', desc:'Standard operating procedures',           stat:'—',               stat2:'documents' },
   ];
 
@@ -174,8 +178,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     { label:'Clients',   view:'clients',   d:'M4 20a8 8 0 0 1 16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8' },
     { label:'Policies',  view:'policies',  d:'M7 3h7l5 5v13H7zM14 3v5h5' },
     { label:'Pipeline',  view:'pipeline',  d:'M3 5h18l-7 8v6l-4-2v-4z' },
-    { label:'Cases',     go:'cases',       d:'M4 8h16v11H4zM9 8V5h6v3' },
-    { label:'Tasks',     go:'home',        d:'M5 6h11M5 12h11M5 18h7M18 15l2 2 4-4' },
+    { label:'Quotes',    view:'quotes',    d:'M7 3h7l5 5v13H7zM14 3v5h5M9 13h6M9 17h4' },
+    { label:'Cases',     view:'cases',     d:'M4 8h16v11H4zM9 8V5h6v3' },
+    { label:'Tasks',     view:'tasks',     d:'M5 6h11M5 12h11M5 18h7M18 15l2 2 4-4' },
     { label:'Leads',     view:'leads',     d:'M4 20V10M10 20V4M16 20v-7M22 20H2' },
     { label:'Ask Hermes',ai:true,          d:'M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z' },
   ];
@@ -194,7 +199,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     { name:'Renewals', count:'—', desc:'Own workspace ↗', to:'renewals' },
     { name:'Commissions', count:'—', desc:'Reconcile in Finance', to:'finance' },
     { name:'Pipeline', count:'—', desc:'Quote-to-bind workflow', to:'crm:pipeline' },
-    { name:'Cases', count:'—', desc:'Agency service work ↗', to:'cases' },
+    { name:'Cases', count:'—', desc:'Agency service work', to:'crm:cases' },
   ];
   // Which CRM sub-view is open. 'workspace' is the overview above; the rest are
   // real tables fed by the endpoints server.js now proxies.
@@ -208,6 +213,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
                  cols:[['insured_name','Client'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['carrier','Carrier'],['next_action','Next action']] },
     leads:     { label:'Leads',    endpoint:'/api/leads',    key:'leads',
                  cols:[['name','Lead'],['prospect_type','Type'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
+    quotes:    { label:'Quotes',   endpoint:'/api/quotes',   key:'quotes',
+                 cols:[['insured_name','Client'],['line_of_business','LOB'],['carrier','Carrier'],['premium','Premium','money'],['quote_number','Quote #'],['effective_date','Effective','date'],['status','Status','chip']] },
+    cases:     { label:'Cases',    endpoint:'/api/cases',    key:'cases',
+                 cols:[['case_number','Case #'],['title','Subject'],['insured_name','Client'],['case_type','Type'],['status','Status','chip'],['priority','Priority','chip'],['owner_email','Owner','person'],['due_at','Due','date']] },
+    tasks:     { label:'Tasks',    endpoint:'/api/tasks',    key:'tasks',
+                 cols:[['title','Task'],['status','Status','chip'],['priority','Priority','chip'],['assignee','Assignee'],['due_at','Due','date'],['case_id','Scope','scope']] },
   };
   var crmData = {};   // view key -> rows | {_error}
 
@@ -454,6 +465,45 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+  // Status/priority wording differs between cases and tasks (open / not_started
+  // / in_progress / high…), so colour by meaning rather than by exact string.
+  var crmChip = {
+    open:['#B9822A','#F7EEDB'], not_started:['#6B7078','#EFEFEC'], in_progress:['#2563EB','#E9EFFC'],
+    waiting:['#B9822A','#F7EEDB'], blocked:['#B4231F','#FBE9E7'], overdue:['#B4231F','#FBE9E7'],
+    closed:['#2F6B4F','#EAF1EC'], done:['#2F6B4F','#EAF1EC'], completed:['#2F6B4F','#EAF1EC'], resolved:['#2F6B4F','#EAF1EC'],
+    high:['#B4231F','#FBE9E7'], urgent:['#B4231F','#FBE9E7'], medium:['#B9822A','#F7EEDB'], normal:['#6B7078','#EFEFEC'], low:['#6B7078','#EFEFEC'],
+  };
+  function chipHtml(v){
+    if(v==null||v==='') return '—';
+    var k = String(v).toLowerCase().replace(/[\s-]+/g,'_');
+    var c = crmChip[k] || ['#6B7078','#EFEFEC'];
+    var label = String(v).replace(/_/g,' ');
+    return '<span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 9px;color:'+c[0]+';background:'+c[1]+'">'+esc(label)+'</span>';
+  }
+  // A due date is the whole point of a task list, so say when it has passed.
+  function dueHtml(v){
+    if(!v) return '—';
+    var t = new Date(v).getTime();
+    if(isNaN(t)) return esc(String(v));
+    var d = new Date(t), today = new Date(); today.setHours(0,0,0,0);
+    var txt = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · overdue</span>';
+    return esc(txt);
+  }
+  function crmCell(r, c){
+    var v = r[c[0]], fmt = c[2], txt;
+    if(fmt==='money') txt = money(v);
+    else if(fmt==='chip') txt = chipHtml(v);
+    else if(fmt==='date') txt = dueHtml(v);
+    else if(fmt==='person') txt = (v ? esc(nameFromEmail(v)) : '—');
+    // A task is case work, client work, or purely internal. Which it is, is the
+    // difference between a task list and a pile.
+    else if(fmt==='scope') txt = chipHtml(v ? 'case' : (r.insured_database_id ? 'client' : 'internal'));
+    else txt = (v==null||v==='' ? '—' : esc(String(v)));
+    return '<span style="font-size:12.5px;color:#3D4149;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+         + (fmt==='money'?';text-align:right;font-variant-numeric:tabular-nums':'')+'">'+txt+'</span>';
+  }
+
   // A CRM sub-view: header, then a table of whatever the endpoint returned.
   // Never renders a placeholder row — an empty book says it is empty.
   function crmTable(key){
@@ -473,12 +523,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     } else {
       body = d.rows.slice(0,200).map(function(r){
         return '<div class="rowh" style="'+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
-          + cfg.cols.map(function(c){
-              var v = r[c[0]];
-              var txt = (c[2]==='money') ? money(v) : (v==null||v==='' ? '—' : esc(String(v)));
-              return '<span style="font-size:12.5px;color:#3D4149;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-                   + (c[2]==='money'?';text-align:right;font-variant-numeric:tabular-nums':'')+'">'+txt+'</span>';
-            }).join('')
+          + cfg.cols.map(function(c){ return crmCell(r, c); }).join('')
         + '</div>';
       }).join('');
     }
@@ -935,6 +980,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if(screen==='carrier') return renderCarrier();
       if(screen==='storage') return embedScreen('Storage', STORAGE_EMBED, 'NextCloud Files · client documents', '#4B77BE');
       if(screen==='team') return embedScreen('Team Chat', TALK_EMBED, 'NextCloud Talk · channels & DMs', '#0F7B6C');
+      if(screen==='deck') return embedScreen('Deck', DECK_EMBED, 'NextCloud Deck · boards & cards', '#6D28D9');
       if(screen==='intake') return embedLocalScreen('Intake', INTAKE_EMBED, 'Evidence in, assessed & verified out', '#B9822A');
       if(stubKeys.indexOf(screen)>=0) return renderStub(screen);
       return renderHome(people[state.user]);
@@ -1190,10 +1236,19 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     sources.cases='live'; return true;
   }
 
-  function pull(path){
+  function pull(path, _retried){
     return fetch(path,{headers:{'Accept':'application/json'}})
       .then(function(r){ return r.json(); })
-      .catch(function(){ return { _error:'fetch failed' }; });
+      .catch(function(){ return { _error:'fetch failed' }; })
+      .then(function(d){
+        // Retry once on a timeout: the backend stalls for ~30s whenever a live
+        // AMS read is attempted and fails, and an 8s upstream timeout landing
+        // inside that window blanks a panel that would otherwise be fine.
+        if(!_retried && d && d._error && /timeout/i.test(d._error)){
+          return new Promise(function(res){ setTimeout(res, 1200); }).then(function(){ return pull(path, true); });
+        }
+        return d;
+      });
   }
 
   function fetchLive(){
@@ -1227,7 +1282,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       { name:'Renewals', count:n(d.renewals), desc:'Own workspace ↗', to:'renewals' },
       { name:'Commissions', count:n(d.commissions), desc:'Reconcile in Finance', to:'finance' },
       { name:'Pipeline', count:n(d.pipeline), desc:'Quote-to-bind workflow', to:'crm:pipeline' },
-      { name:'Cases', count:n(d.open_cases), desc:'Agency service work ↗', to:'cases' },
+      { name:'Cases', count:n(d.open_cases), desc:'Agency service work', to:'crm:cases' },
     ];
     sources.workspace = 'live';
     return true;
