@@ -231,7 +231,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   ];
   var rStat = { 'At risk':['#B4231F','#FBE9E7'],'In progress':['#B9822A','#F7EEDB'],'Quoted':['#2563EB','#E9EFFC'],'Confirmed':['#2F6B4F','#EAF1EC'],'Not started':['#6B7078','#EFEFEC'] };
   var renewalRows = [];
-  var acme = null;   // filled from the selected live renewal row
+  // Neutral placeholder for the renewal detail overlay before a row is picked.
+  // Must keep every key the overlay reads — it dereferences these unguarded.
+  var acme = { client:'—', line:'—', status:'—', statusColor:'#6B7078', statusBg:'#EFEFEC',
+               renews:'—', priorPremium:'—', address:'Select a renewal to see the insured.',
+               contact:'—', phone:'', email:'', note:'Select a renewal to see its strategy note.' };
   var detailFacts = [
     { label:'Open tasks', value:'—', sub:'case-linked', color:'#1B1D22' },
     { label:'Avg age', value:'—', sub:'open cases', color:'#2F6B4F' },
@@ -258,7 +262,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   ];
   var cCat = { 'Endorsement':['#2563EB','#E9EFFC'],'Claim':['#B4231F','#FBE9E7'],'Service':['#2F6B4F','#EAF1EC'],'COI':['#B9822A','#F7EEDB'],'Billing':['#6D28D9','#EDE7FB'] };
   var caseRows = [];
-  var dcase = null;  // filled from the selected live case row
+  // Same for the case detail overlay.
+  var dcase = { subj:'—', client:'—', cat:'—', catColor:'#6B7078', catBg:'#EFEFEC',
+                status:'—', owner:'—', opened:'—', loss:'Select a case to see its detail.' };
   var caseFacts = [];
   var caseTasks = [];
   var caseTimeline = [];
@@ -686,7 +692,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '</div>'
         + '<div style="width:280px;flex:none;display:flex;flex-direction:column;gap:16px">'
           + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Insured</span><div style="font-size:13.5px;color:#25282E;margin-top:10px;white-space:pre-line;line-height:1.5">'+dv.address+'</div>'+(dv.contact&&dv.contact!=='—'?'<div style="height:1px;background:#F0F0EC;margin:13px 0"></div><div style="font-size:13px;color:#25282E;font-weight:500">'+dv.contact+'</div><div style="font-size:12.5px;color:#6B7078;margin-top:4px">'+dv.phone+'</div><div style="font-size:12.5px;color:#2563EB;margin-top:2px">'+dv.email+'</div>':'')+'</div>'
-          + '<div style="background:#3A1B0E;border-radius:13px;padding:16px 18px;color:#FAEDE5"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#E9A57F;font-weight:700;margin-bottom:8px">Hermes · Renewals</div><div style="font-size:13px;line-height:1.5">'+(live?dv.note:('No quote on file and 1 day to expiry — highest priority. Prior term was '+acme.priorPremium+'; loss runs are clean. Recommend calling '+acme.contact+' today.'))+'</div></div>'
+          + '<div style="background:#3A1B0E;border-radius:13px;padding:16px 18px;color:#FAEDE5"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#E9A57F;font-weight:700;margin-bottom:8px">Hermes · Renewals</div><div style="font-size:13px;line-height:1.5">'+(live?dv.note:'Select a renewal to see its strategy note.')+'</div></div>'
         + '</div>'
       + '</div>'
     + '</div>';
