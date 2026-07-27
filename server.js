@@ -109,10 +109,23 @@ const WRITE_ROUTES = [
   { m: 'POST',   re: /^\/api\/tasks\/([0-9a-f-]{36})\/complete$/,
     to: '/api/command-center/tasks/$1/complete' },
 
-  // Cases — open (ad-hoc or from a template) and close with its resolution.
+  // Cases — open (ad-hoc or from a template), edit, close with its resolution,
+  // or delete outright. Deleting takes the case's tasks, timeline and document
+  // links with it (not the Nextcloud files) and is logged with a named actor by
+  // the backend; a case opened by mistake had no other way off the board.
   { m: 'POST',   re: /^\/api\/cases$/ },
   { m: 'POST',   re: /^\/api\/cases\/from-template$/ },
+  { m: 'PATCH',  re: /^\/api\/cases\/([0-9a-f-]{36})$/ },
   { m: 'POST',   re: /^\/api\/cases\/([0-9a-f-]{36})\/close$/ },
+  { m: 'DELETE', re: /^\/api\/cases\/([0-9a-f-]{36})$/ },
+
+  // Tasks — delete. Create/edit/complete are above.
+  { m: 'DELETE', re: /^\/api\/tasks\/([0-9a-f-]{36})$/ },
+
+  // Renewal working detail: both premiums, the risk call, the strategy note.
+  // The change percentage is generated in Postgres from the premiums, so it is
+  // not writable here or anywhere else.
+  { m: 'PATCH',  re: /^\/api\/renewals\/([0-9a-f-]{36})$/ },
 
   // Pipeline — create and move deals.
   { m: 'POST',   re: /^\/api\/opportunities$/ },
