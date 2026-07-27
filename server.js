@@ -124,6 +124,11 @@ const WRITE_ROUTES = [
   // is a separate decision and deliberately not wired here.
   { m: 'POST',   re: /^\/api\/clients\/([0-9a-f-]{36})\/override$/ },
 
+  // Same for a policy field. What keeps the NowCerts identifiers (policy guid,
+  // insured guid, renewed_policy, policy number) out of reach is the backend's
+  // allowlist, not this line — this only says corrections may be attempted.
+  { m: 'POST',   re: /^\/api\/policies\/([0-9a-f-]{36})\/override$/ },
+
   // Retry a stuck sync job — recovery, not a new write.
   { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ },
 
