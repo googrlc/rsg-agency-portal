@@ -37,11 +37,23 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false };
+  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false, crmView:'workspace' };
   function setState(patch){ Object.assign(state, patch); render(); }
 
-  // Per-section data source: 'sample' until a live fetch succeeds, then 'live'.
-  var sources = { renewals:'sample', tasks:'sample', commissions:'sample', cases:'sample', carrier:'sample' };
+  // Per-section data source. Starts 'pending' and only ever becomes 'live' — the
+  // sample datasets were deleted, so a panel that hasn't loaded says so rather
+  // than showing invented clients and premiums.
+  var sources = { renewals:'pending', tasks:'pending', commissions:'pending', cases:'pending', carrier:'pending', workspace:'pending' };
+  var financeOwed = null;   // summed from live commission rows
+  var taskCount = 0;        // live task count across the team
+
+  // Live records are interpolated straight into markup, and a client name is
+  // free text someone typed into an AMS — escape it.
+  function esc(v){
+    return (v==null?'':String(v)).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
   var selRenewal = null;  // live renewal row chosen for the detail overlay
   var carrierData = null; // cached carrier directory from carrierhub
   // Full apps embedded in the hybrid workspaces, reachable over the tailnet.
@@ -128,90 +140,90 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // Static data (ported from the design's renderVals)
   // ------------------------------------------------------------------
   var reg = [
-    { key:'crm',      mono:'CR', railLabel:'CRM',      name:'CRM',           accent:'#2F6B4F', tint:'#EAF1EC', desc:'Client book — accounts, policies, cases', stat:'414 clients',     stat2:'614 policies' },
-    { key:'renewals', mono:'RN', railLabel:'Renewals', name:'Renewals',      accent:'#C2410C', tint:'#F7EAE1', desc:'Retention & renewal worklist',            stat:'38 due',          stat2:'12 at risk' },
-    { key:'carrier',  mono:'CH', railLabel:'Carrier',  name:'Carrier Hub',   accent:'#2563EB', tint:'#E9EFFC', desc:'Appetite, appointments & submissions',    stat:'123 appointments',stat2:'$25.8k pipeline' },
-    { key:'intake',   mono:'IG', railLabel:'Intake',   name:'Intake',        accent:'#B9822A', tint:'#F6EEDB', desc:'Evidence in, assessed & verified out',    stat:'3 in review',     stat2:'writes locked' },
-    { key:'cases',    mono:'CS', railLabel:'Cases',    name:'Tasks & Cases', accent:'#16233F', tint:'#E7EAF0', desc:'Service work — endorsements, claims, COIs',stat:'14 open',         stat2:'3 overdue' },
-    { key:'finance',  mono:'CT', railLabel:'Finance',  name:'Finance',       accent:'#B9822A', tint:'#F7EEDB', desc:'Commissions — expected vs received',      stat:'$6,566 owed',     stat2:'7 variances' },
+    { key:'crm',      mono:'CR', railLabel:'CRM',      name:'CRM',           accent:'#2F6B4F', tint:'#EAF1EC', desc:'Client book — accounts, policies, cases', stat:'—',     stat2:'—' },
+    { key:'renewals', mono:'RN', railLabel:'Renewals', name:'Renewals',      accent:'#C2410C', tint:'#F7EAE1', desc:'Retention & renewal worklist',            stat:'—',          stat2:'—' },
+    { key:'carrier',  mono:'CH', railLabel:'Carrier',  name:'Carrier Hub',   accent:'#2563EB', tint:'#E9EFFC', desc:'Appetite, appointments & submissions',    stat:'—',stat2:'—' },
+    { key:'intake',   mono:'IG', railLabel:'Intake',   name:'Intake',        accent:'#B9822A', tint:'#F6EEDB', desc:'Evidence in, assessed & verified out',    stat:'—',               stat2:'writes locked' },
+    { key:'cases',    mono:'CS', railLabel:'Cases',    name:'Tasks & Cases', accent:'#16233F', tint:'#E7EAF0', desc:'Service work — endorsements, claims, COIs',stat:'—',         stat2:'—' },
+    { key:'finance',  mono:'CT', railLabel:'Finance',  name:'Finance',       accent:'#B9822A', tint:'#F7EEDB', desc:'Commissions — expected vs received',      stat:'—',     stat2:'—' },
     { key:'storage',  mono:'ST', railLabel:'Storage',  name:'Storage',       accent:'#4B77BE', tint:'#E9EEF7', desc:'NextCloud files & shared documents',      stat:'NextCloud',       stat2:'synced' },
-    { key:'team',     mono:'TM', railLabel:'Team',     name:'Team Chat',     accent:'#0F7B6C', tint:'#E4F1EF', desc:'Chat, questions & document sharing',      stat:'5 unread',        stat2:'3 channels' },
-    { key:'sops',     mono:'SO', railLabel:'SOPs',     name:'SOPs',          accent:'#8E3B5B', tint:'#F5E9EE', desc:'Standard operating procedures',           stat:'24 docs',         stat2:'2 updated' },
+    { key:'team',     mono:'TM', railLabel:'Team',     name:'Team Chat',     accent:'#0F7B6C', tint:'#E4F1EF', desc:'Chat, questions & document sharing',      stat:'—',               stat2:'channels' },
+    { key:'sops',     mono:'SO', railLabel:'SOPs',     name:'SOPs',          accent:'#8E3B5B', tint:'#F5E9EE', desc:'Standard operating procedures',           stat:'—',               stat2:'documents' },
   ];
 
   var people = { lamar:{ name:'Lamar', initial:'L', accent:'#16233F' }, gretchen:{ name:'Gretchen', initial:'G', accent:'#8E3B5B' } };
-  var tasksByUser = {
-    lamar:[
-      { color:'#B9822A', text:'Chase $6,566 in commission shorts (4 carriers)', tag:'Finance', due:'Today' },
-      { color:'#16233F', text:'Review Example Contracting LLC intake',           tag:'Intake',  due:'Today' },
-      { color:'#2563EB', text:'Approve 2 carrier appointment requests',           tag:'Carrier', due:'Tomorrow' },
-      { color:'#2F6B4F', text:'Call Acme Roofing — renewal at risk',              tag:'CRM',     due:'Jul 24' },
-      { color:'#0F7B6C', text:'Reply in RSG — Renewal Updates',                   tag:'Team',    due:'Jul 24' },
-    ],
-    gretchen:[
-      { color:'#16233F', text:'Prep month-end reconciliation export',   tag:'Finance', due:'Today' },
-      { color:'#2F6B4F', text:'Send proposal to Miller Landscaping',     tag:'CRM',     due:'Today' },
-      { color:'#2F6B4F', text:'Follow up 5 lapse-check clients',         tag:'CRM',     due:'Tomorrow' },
-      { color:'#8E3B5B', text:'Update SOP: new-business intake flow',    tag:'SOPs',    due:'Jul 25' },
-      { color:'#2563EB', text:'Confirm appetite for Miller GL',          tag:'Carrier', due:'Jul 25' },
-    ],
-  };
+  // Filled from /api/tasks. Invented work is worse than an empty list: a
+  // fabricated "Call Acme Roofing — renewal at risk" is indistinguishable from a
+  // real one, and this is the screen someone works from in the morning.
+  var tasksByUser = { lamar:[], gretchen:[] };
 
+  // Placeholders until /api/renewals + /api/commissions + /api/tasks land.
   var homeKpis = [
-    { label:'Renewals due', value:'38', sub:'need attention this week', color:'#2F6B4F' },
-    { label:'Money to chase', value:'$6,566', sub:'commission shorts', color:'#B9822A' },
-    { label:'Intake queue', value:'3', sub:'clients awaiting review', color:'#16233F' },
-    { label:'Unread', value:'5', sub:'across 3 team channels', color:'#0F7B6C' },
+    { label:'Renewals due', value:'—', sub:'need attention this week', color:'#2F6B4F' },
+    { label:'Money to chase', value:'—', sub:'commission shorts', color:'#B9822A' },
+    { label:'Open cases', value:'—', sub:'agency service work', color:'#16233F' },
+    { label:'Open tasks', value:'—', sub:'assigned across the team', color:'#0F7B6C' },
   ];
 
   // CRM
+  // `view` opens a CRM sub-view; `go` jumps to a top-level portal screen that
+  // already owns that work. These used to be inert <div>s with a pointer cursor
+  // and no handler, which is why clicking anything in here did nothing.
   var crmNavRaw = [
-    { label:'Workspace', active:true,  d:'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z' },
-    { label:'Clients',   active:false, d:'M4 20a8 8 0 0 1 16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8' },
-    { label:'Policies',  active:false, d:'M7 3h7l5 5v13H7zM14 3v5h5' },
-    { label:'Pipeline',  active:false, d:'M3 5h18l-7 8v6l-4-2v-4z' },
-    { label:'Cases',     active:false, d:'M4 8h16v11H4zM9 8V5h6v3' },
-    { label:'Tasks',     active:false, d:'M5 6h11M5 12h11M5 18h7M18 15l2 2 4-4' },
-    { label:'Leads',     active:false, d:'M4 20V10M10 20V4M16 20v-7M22 20H2' },
-    { label:'Ask Hermes',active:false, d:'M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z' },
+    { label:'Workspace', view:'workspace', d:'M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z' },
+    { label:'Clients',   view:'clients',   d:'M4 20a8 8 0 0 1 16 0M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8' },
+    { label:'Policies',  view:'policies',  d:'M7 3h7l5 5v13H7zM14 3v5h5' },
+    { label:'Pipeline',  view:'pipeline',  d:'M3 5h18l-7 8v6l-4-2v-4z' },
+    { label:'Cases',     go:'cases',       d:'M4 8h16v11H4zM9 8V5h6v3' },
+    { label:'Tasks',     go:'home',        d:'M5 6h11M5 12h11M5 18h7M18 15l2 2 4-4' },
+    { label:'Leads',     view:'leads',     d:'M4 20V10M10 20V4M16 20v-7M22 20H2' },
+    { label:'Ask Hermes',ai:true,          d:'M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z' },
   ];
+  // Placeholders only — every one of these is replaced by /api/workspace-stats on
+  // load. They shipped as hardcoded strings (414 clients, 614 policies) against a
+  // book that actually holds 441 policies, so the screen read as authoritative
+  // while being decorative. Kept solely so the layout has something to draw
+  // before the first response lands.
   var crmKpis = [
-    { label:'Clients', value:'414', sub:'canonical' }, { label:'Policies', value:'614', sub:'$2.78M annualized' }, { label:'Renewals', value:'38', sub:'need attention' },
-    { label:'Pipeline', value:'6', sub:'open opportunities' }, { label:'Open cases', value:'14', sub:'service work' }, { label:'Open tasks', value:'18', sub:'case-linked' },
+    { label:'Clients', value:'—', sub:'canonical' }, { label:'Policies', value:'—', sub:'annualized' }, { label:'Renewals', value:'—', sub:'need attention' },
+    { label:'Pipeline', value:'—', sub:'open opportunities' }, { label:'Open cases', value:'—', sub:'service work' }, { label:'Open tasks', value:'—', sub:'case-linked' },
   ];
   var crmCardsRaw = [
-    { name:'Clients', count:'414', desc:'NowCerts insured records', to:null },
-    { name:'Policies', count:'614', desc:'Coverage & premium mirrors', to:null },
-    { name:'Renewals', count:'38', desc:'Own workspace ↗', to:'renewals' },
-    { name:'Commissions', count:'104', desc:'Reconcile in Finance', to:'finance' },
-    { name:'Pipeline', count:'6', desc:'Quote-to-bind workflow', to:null },
-    { name:'Cases', count:'14', desc:'Agency service work ↗', to:'cases' },
+    { name:'Clients', count:'—', desc:'NowCerts insured records', to:'crm:clients' },
+    { name:'Policies', count:'—', desc:'Coverage & premium mirrors', to:'crm:policies' },
+    { name:'Renewals', count:'—', desc:'Own workspace ↗', to:'renewals' },
+    { name:'Commissions', count:'—', desc:'Reconcile in Finance', to:'finance' },
+    { name:'Pipeline', count:'—', desc:'Quote-to-bind workflow', to:'crm:pipeline' },
+    { name:'Cases', count:'—', desc:'Agency service work ↗', to:'cases' },
   ];
+  // Which CRM sub-view is open. 'workspace' is the overview above; the rest are
+  // real tables fed by the endpoints server.js now proxies.
+  var CRM_VIEWS = {
+    workspace: { label:'Workspace' },
+    clients:   { label:'Clients',  endpoint:'/api/clients',  key:'clients',
+                 cols:[['insured_name','Client'],['client_type','Type'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
+    policies:  { label:'Policies', endpoint:'/api/policies', key:'policies',
+                 cols:[['insured_name','Client'],['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status'],['expiration_date','Expires'],['annualized_premium','Annualized','money']] },
+    pipeline:  { label:'Pipeline', endpoint:'/api/pipeline', key:'opportunities',
+                 cols:[['insured_name','Client'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['carrier','Carrier'],['next_action','Next action']] },
+    leads:     { label:'Leads',    endpoint:'/api/leads',    key:'leads',
+                 cols:[['name','Lead'],['prospect_type','Type'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
+  };
+  var crmData = {};   // view key -> rows | {_error}
 
   // Renewals
   var renewalKpis = [
-    { label:'Due in 30 days', value:'38', sub:'across all lines', color:'#1B1D22' },
-    { label:'At risk', value:'12', sub:'no quote yet', color:'#B4231F' },
-    { label:'Retention YTD', value:'91%', sub:'target 90%', color:'#2F6B4F' },
-    { label:'Premium at renewal', value:'$1.24M', sub:'annualized', color:'#1B1D22' },
+    { label:'Due in 30 days', value:'—', sub:'across all lines', color:'#1B1D22' },
+    { label:'At risk', value:'—', sub:'no quote yet', color:'#B4231F' },
+    { label:'Retention', value:'—', sub:'target 75%', color:'#2F6B4F' },
+    { label:'Premium at renewal', value:'—', sub:'annualized', color:'#1B1D22' },
   ];
   var rStat = { 'At risk':['#B4231F','#FBE9E7'],'In progress':['#B9822A','#F7EEDB'],'Quoted':['#2563EB','#E9EFFC'],'Confirmed':['#2F6B4F','#EAF1EC'],'Not started':['#6B7078','#EFEFEC'] };
-  var renewalRows = [
-    { client:'Acme Roofing', line:'GL + BOP', premium:'$8,420', days:'1 day', status:'At risk', owner:'Gretchen' },
-    { client:'Miller Landscaping', line:'Commercial Auto', premium:'$12,100', days:'4 days', status:'In progress', owner:'Gretchen' },
-    { client:'Coastal HVAC', line:'Workers Comp', premium:'$22,300', days:'6 days', status:'Quoted', owner:'Lamar' },
-    { client:'Vertex Contracting', line:'Umbrella', premium:'$4,900', days:'9 days', status:'At risk', owner:'Lamar' },
-    { client:'Summit Electric', line:'GL', premium:'$6,750', days:'12 days', status:'Confirmed', owner:'Gretchen' },
-    { client:'Harbor Freight Co', line:'Property', premium:'$18,200', days:'15 days', status:'In progress', owner:'Lamar' },
-    { client:'Delta Plumbing', line:'BOP', premium:'$5,300', days:'21 days', status:'Not started', owner:'Gretchen' },
-    { client:'Ridgeline Builders', line:'GL + Umbrella', premium:'$14,600', days:'27 days', status:'Quoted', owner:'Lamar' },
-  ];
-  var acme = { client:'Acme Roofing LLC', line:'General Liability + BOP', status:'At risk', statusColor:'#B4231F', statusBg:'#FBE9E7', renews:'Jul 24, 2026 (1 day)', priorPremium:'$7,980', address:'2140 Industrial Pkwy, Suite 5\nColumbus, OH 43204', contact:'Dave Marek · owner', phone:'(614) 555-0142', email:'dave@acmeroofing.com' };
+  var renewalRows = [];
+  var acme = null;   // filled from the selected live renewal row
   var detailFacts = [
-    { label:'Policy #', value:'BOP-4471902' }, { label:'Carrier', value:'The Hartford' },
-    { label:'NAICS', value:'238160 · Roofing Contractors' }, { label:'Term', value:'Aug 24, 2025 → Aug 24, 2026' },
-    { label:'Premium', value:'$8,420 (prior $7,980)' }, { label:'Renews', value:'Jul 24, 2026 (1 day)' },
-    { label:'Producer', value:'Gretchen' }, { label:'Bill type', value:'Agency bill · annual' },
+    { label:'Open tasks', value:'—', sub:'case-linked', color:'#1B1D22' },
+    { label:'Avg age', value:'—', sub:'open cases', color:'#2F6B4F' },
   ];
   var detailCoverages = [
     { name:'General Liability', limit:'$1M / $2M aggregate', ded:'$1,000' },
@@ -234,50 +246,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     { label:'Avg age', value:'6d', sub:'open cases', color:'#2F6B4F' },
   ];
   var cCat = { 'Endorsement':['#2563EB','#E9EFFC'],'Claim':['#B4231F','#FBE9E7'],'Service':['#2F6B4F','#EAF1EC'],'COI':['#B9822A','#F7EEDB'],'Billing':['#6D28D9','#EDE7FB'] };
-  var caseRows = [
-    { subj:'Add insured — Riverside GC', client:'Acme Roofing', cat:'COI', tasks:'2 open', age:'1d', status:'In progress', owner:'Gretchen' },
-    { subj:'Auto glass claim intake', client:'Miller Landscaping', cat:'Claim', tasks:'4 open', age:'2d', status:'Waiting', owner:'Lamar' },
-    { subj:'Add scheduled equipment', client:'Coastal HVAC', cat:'Endorsement', tasks:'1 open', age:'3d', status:'In progress', owner:'Lamar' },
-    { subj:'Update mailing address', client:'Summit Electric', cat:'Service', tasks:'1 open', age:'4d', status:'In progress', owner:'Gretchen' },
-    { subj:'Invoice dispute — installment', client:'Harbor Freight Co', cat:'Billing', tasks:'2 open', age:'8d', status:'Overdue', owner:'Lamar' },
-    { subj:'COI for new job site', client:'Vertex Contracting', cat:'COI', tasks:'1 open', age:'9d', status:'Overdue', owner:'Gretchen' },
-    { subj:'Water damage claim', client:'Delta Plumbing', cat:'Claim', tasks:'5 open', age:'11d', status:'Overdue', owner:'Lamar' },
-  ];
-  var dcase = { subj:'Water damage claim', client:'Delta Plumbing', cat:'Claim', catColor:'#B4231F', catBg:'#FBE9E7', status:'Overdue', owner:'Lamar', opened:'Jul 12, 2026', loss:'Burst supply line flooded finished basement office; water mitigation underway.' };
-  var caseFacts = [
-    { label:'Claim #', value:'CLM-88213' }, { label:'Carrier', value:'Travelers' }, { label:'Policy', value:'BOP-3320117' },
-    { label:'Adjuster', value:'R. Okafor · (866) 555-0190' }, { label:'Opened', value:'Jul 12, 2026' }, { label:'Target', value:'Jul 18, 2026 (overdue 5d)' },
-  ];
-  var caseTasks = [
-    { text:'Submit ACORD loss notice to Travelers', who:'Lamar', due:'Done Jul 12', done:true },
-    { text:'Upload water-mitigation invoice', who:'Lamar', due:'Overdue', done:false },
-    { text:'Collect photos from insured', who:'Gretchen', due:'Today', done:false },
-    { text:'Confirm adjuster site visit', who:'Lamar', due:'Jul 24', done:false },
-    { text:'Log reserve estimate in AMS', who:'Lamar', due:'Jul 25', done:false },
-  ];
-  var caseTimeline = [
-    { when:'Jul 22', text:'Case flagged overdue — mitigation invoice not filed', color:'#B4231F' },
-    { when:'Jul 16', text:'Adjuster R. Okafor assigned by Travelers', color:'#2563EB' },
-    { when:'Jul 13', text:'Emergency water mitigation dispatched', color:'#B9822A' },
-    { when:'Jul 12', text:'Claim opened from insured phone report', color:'#6B7078' },
-  ];
+  var caseRows = [];
+  var dcase = null;  // filled from the selected live case row
+  var caseFacts = [];
+  var caseTasks = [];
+  var caseTimeline = [];
 
   // Finance
   var finKpis = [
-    { label:'Commission owed', value:'$6,566', sub:'expected not received', color:'#B9822A' },
-    { label:'Received MTD', value:'$18,240', sub:'across 6 carriers', color:'#2F6B4F' },
-    { label:'Variances', value:'7', sub:'expected ≠ received', color:'#B4231F' },
-    { label:'Chargebacks', value:'0', sub:'this month', color:'#1B1D22' },
+    { label:'Commission owed', value:'—', sub:'expected not received', color:'#B9822A' },
+    { label:'Received', value:'—', sub:'reconciled', color:'#2F6B4F' },
+    { label:'Variances', value:'—', sub:'expected ≠ received', color:'#B4231F' },
+    { label:'Ledger rows', value:'—', sub:'in the book', color:'#1B1D22' },
   ];
   var vStat = { 'Short':['#B4231F','#FBE9E7'],'Received':['#2F6B4F','#EAF1EC'],'Pending':['#B9822A','#F7EEDB'] };
-  var finRows = [
-    { carrier:'The Hartford', policy:'BOP-4471902', client:'Acme Roofing', expected:'$1,263', received:'$0', status:'Pending' },
-    { carrier:'Travelers', policy:'WC-5510043', client:'Coastal HVAC', expected:'$3,345', received:'$1,900', status:'Short' },
-    { carrier:'Nationwide', policy:'CA-2231888', client:'Miller Landscaping', expected:'$1,815', received:'$1,815', status:'Received' },
-    { carrier:'Liberty Mutual', policy:'GL-7788201', client:'Summit Electric', expected:'$1,012', received:'$0', status:'Short' },
-    { carrier:'Chubb', policy:'UMB-3390021', client:'Vertex Contracting', expected:'$735', received:'$735', status:'Received' },
-    { carrier:'Progressive', policy:'CA-8890123', client:'Delta Plumbing', expected:'$946', received:'$531', status:'Short' },
-  ];
+  var finRows = [];
 
   var headers = {
     home:{ title:'Home', sub:'Risk Solutions Group · agency command center' },
@@ -325,14 +308,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   var aiCfg = {
-    home:{ label:'Ask Hermes', scope:'All desks', accent:'#16233F', iconBg:'#E7EAF0', chipBorder:'#d5dae6', fabBg:'#16233F', fabGlyph:'#E0A82E', q:'Which renewals are at risk this week?', aTag:'Hermes', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'12 renewals are at risk, $6,566 in commission is short across 4 carriers, and 3 cases are overdue. Acme Roofing is the most urgent — it lapses tomorrow.', chips:['At-risk renewals','Money to chase','Overdue cases'], placeholder:'Ask Hermes anything across the agency…' },
-    crm:{ label:'Ask CRM Desk', scope:'CRM data only', accent:'#2F6B4F', iconBg:'#EAF1EC', chipBorder:'#d6e6db', fabBg:'#12271C', fabGlyph:'#8FE3B0', q:'Summarize Acme Roofing for me.', aTag:'Hermes · CRM', aBg:'#12271C', aColor:'#EAF3EC', aAccent:'#7FA98D', a:'Acme Roofing LLC — 3 active policies, $18,400 annual premium, 1 open COI case, and a renewal due tomorrow. No open claims. Producer is Gretchen.', chips:['Summarize a client','Open cases by age','Policies expiring'], placeholder:'Ask about clients, policies, cases…' },
-    renewals:{ label:'Ask Renewals Desk', scope:'Renewals only', accent:'#C2410C', iconBg:'#F7EAE1', chipBorder:'#f0d8c9', fabBg:'#C2410C', fabGlyph:'#FFE1D0', q:"What's slipping this week and what first?", aTag:'Hermes · Renewals', aBg:'#3A1B0E', aColor:'#FAEDE5', aAccent:'#E9A57F', a:'Acme Roofing renews in 1 day with no quote — call first. Vertex Contracting (9 days) is also at risk. Coastal HVAC is quoted and just needs a sign-off.', chips:['At-risk this week','Retention by carrier'], placeholder:'Ask about renewals, retention, owners…' },
-    cases:{ label:'Ask Cases Desk', scope:'Cases & tasks only', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', q:"What's overdue and who's holding it up?", aTag:'Hermes · Cases', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'3 cases are overdue: Harbor Freight billing (8d, Lamar), Vertex COI (9d, Gretchen), and Delta water-damage claim (11d, Lamar) — the claim has 5 open tasks, the biggest bottleneck.', chips:['Overdue by owner','Draft a COI'], placeholder:'Ask about cases, tasks, owners…' },
-    finance:{ label:'Ask Finance Desk', scope:'Finance data only', accent:'#B9822A', iconBg:'#F7EEDB', chipBorder:'#eaddbc', fabBg:'#16233F', fabGlyph:'#E0A82E', q:"Where's the $6,566 and who do I chase?", aTag:'Hermes · Finance', aBg:'#3A2A0E', aColor:'#F7EEDD', aAccent:'#E0B85F', a:"3 carriers are short: Travelers ($1,445 on Coastal HVAC WC), Liberty Mutual ($1,012 unpaid), Progressive ($415 on Delta). The Hartford's $1,263 is pending.", chips:['Shorts by carrier','Reconcile last month'], placeholder:'Ask about commissions, statements…' },
-    carrier:{ label:'Ask Carrier Desk', scope:'Carriers & appetite', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', q:'Who can write a roofing GL in Ohio?', aTag:'Hermes · Carrier', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:'You have 123 appointed markets. Filter the directory by line or appetite, or open the full Carrier Hub for the appetite grid, worksheets, and logins.', chips:['Who can write this?','Appointments by line'], placeholder:'Ask about carriers, appetite, contacts…' },
+    home:{ label:'Ask Hermes', scope:'All desks', accent:'#16233F', iconBg:'#E7EAF0', chipBorder:'#d5dae6', fabBg:'#16233F', fabGlyph:'#E0A82E', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', chips:['At-risk renewals','Money to chase','Overdue cases'], placeholder:'Ask Hermes anything across the agency…' },
+    crm:{ label:'Ask CRM Desk', scope:'CRM data only', accent:'#2F6B4F', iconBg:'#EAF1EC', chipBorder:'#d6e6db', fabBg:'#12271C', fabGlyph:'#8FE3B0', aBg:'#12271C', aColor:'#EAF3EC', aAccent:'#7FA98D', chips:['Summarize a client','Open cases by age','Policies expiring'], placeholder:'Ask about clients, policies, cases…' },
+    renewals:{ label:'Ask Renewals Desk', scope:'Renewals only', accent:'#C2410C', iconBg:'#F7EAE1', chipBorder:'#f0d8c9', fabBg:'#C2410C', fabGlyph:'#FFE1D0', aBg:'#3A1B0E', aColor:'#FAEDE5', aAccent:'#E9A57F', chips:['At-risk this week','Retention by carrier'], placeholder:'Ask about renewals, retention, owners…' },
+    cases:{ label:'Ask Cases Desk', scope:'Cases & tasks only', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', chips:['Overdue by owner','Draft a COI'], placeholder:'Ask about cases, tasks, owners…' },
+    finance:{ label:'Ask Finance Desk', scope:'Finance data only', accent:'#B9822A', iconBg:'#F7EEDB', chipBorder:'#eaddbc', fabBg:'#16233F', fabGlyph:'#E0A82E', aBg:'#3A2A0E', aColor:'#F7EEDD', aAccent:'#E0B85F', chips:['Shorts by carrier','Reconcile last month'], placeholder:'Ask about commissions, statements…' },
+    carrier:{ label:'Ask Carrier Desk', scope:'Carriers & appetite', accent:'#2563EB', iconBg:'#E9EFFC', chipBorder:'#d3e0fa', fabBg:'#16233F', fabGlyph:'#8FB4FF', aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', chips:['Who can write this?','Appointments by line'], placeholder:'Ask about carriers, appetite, contacts…' },
   };
-  function stubAi(m){ return { label:'Ask '+m.name+' Desk', scope:m.name+' only', accent:m.accent, iconBg:m.tint, chipBorder:'rgba(0,0,0,.08)', fabBg:'#16233F', fabGlyph:'#E0A82E', q:'What can you do here?', aTag:'Hermes · '+m.name, aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:"This workspace isn't wired to live data yet. Once "+m.name+" is connected, I'll answer using only its records.", chips:['Learn more'], placeholder:'Ask about '+m.name.toLowerCase()+'…' }; }
+  function stubAi(m){ return { label:'Ask '+m.name+' Desk', scope:m.name+' only', accent:m.accent, iconBg:m.tint, chipBorder:'rgba(0,0,0,.08)', fabBg:'#16233F', fabGlyph:'#E0A82E', aTag:'Hermes · '+m.name, aBg:'#16233F', aColor:'#E7EDF7', aAccent:'#9FB0CB', a:"This workspace isn't wired to live data yet. Once "+m.name+" is connected, I'll answer using only its records.", chips:['Learn more'], placeholder:'Ask about '+m.name.toLowerCase()+'…' }; }
 
   // ------------------------------------------------------------------
   // Helpers
@@ -471,10 +454,65 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+  // A CRM sub-view: header, then a table of whatever the endpoint returned.
+  // Never renders a placeholder row — an empty book says it is empty.
+  function crmTable(key){
+    var cfg = CRM_VIEWS[key], d = crmData[key] || {};
+    var head = cfg.cols.map(function(c){
+      return '<span'+(c[2]==='money'?' style="text-align:right"':'')+'>'+c[1]+'</span>';
+    }).join('');
+    var grid = 'display:grid;grid-template-columns:repeat('+cfg.cols.length+',minmax(0,1fr));gap:12px;';
+
+    var body;
+    if(d.loading || (!d.rows && !d.error)){
+      body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">Loading '+cfg.label.toLowerCase()+'…</div>';
+    } else if(d.error){
+      body = '<div style="padding:26px 18px;font-size:12.5px;color:#B4231F">Couldn\'t load '+cfg.label.toLowerCase()+' — '+esc(d.error)+'</div>';
+    } else if(!d.rows.length){
+      body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">No '+cfg.label.toLowerCase()+' in the book.</div>';
+    } else {
+      body = d.rows.slice(0,200).map(function(r){
+        return '<div class="rowh" style="'+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
+          + cfg.cols.map(function(c){
+              var v = r[c[0]];
+              var txt = (c[2]==='money') ? money(v) : (v==null||v==='' ? '—' : esc(String(v)));
+              return '<span style="font-size:12.5px;color:#3D4149;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+                   + (c[2]==='money'?';text-align:right;font-variant-numeric:tabular-nums':'')+'">'+txt+'</span>';
+            }).join('')
+        + '</div>';
+      }).join('');
+    }
+    var count = d.rows ? d.rows.length : null;
+    return '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live from Hermes</div>'
+      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">'+cfg.label+'</h1>'
+      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 18px">'
+        + (count!=null ? count.toLocaleString('en-US')+' record'+(count===1?'':'s')+(count>200?' · showing first 200':'') : '&nbsp;')
+      + '</p>'
+      + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
+        + '<div style="'+grid+'padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+head+'</div>'
+        + body
+      + '</div>';
+  }
+
+  // A panel with no rows says why. The sample datasets that used to fill this
+  // gap were removed: invented clients and premiums are indistinguishable from
+  // real ones, and this is what the agency works from.
+  function panelEmpty(source, label){
+    var msg = sources[source]==='live'
+      ? 'No '+label+' right now.'
+      : 'Loading '+label+'\u2026';
+    return '<div style="padding:28px 18px;font-size:12.5px;color:#96999F">'+msg+'</div>';
+  }
+
   function renderCRM(){
+    var view = state.crmView || 'workspace';
     var nav = crmNavRaw.map(function(n){
-      var color = n.active?'#FFFFFF':'#9FBBA8', bg = n.active?'rgba(255,255,255,.10)':'transparent', weight = n.active?600:500;
-      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer;color:'+color+';background:'+bg+';font-size:13px;font-weight:'+weight+'"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="'+n.d+'"></path></svg><span>'+n.label+'</span></div>';
+      var on = n.view === view;
+      var color = on?'#FFFFFF':'#9FBBA8', bg = on?'rgba(255,255,255,.10)':'transparent', weight = on?600:500;
+      // Every entry now carries a handler: a sub-view, a jump to the screen that
+      // owns that work, or the assistant. They used to be inert divs.
+      var attr = n.view ? ' data-crmview="'+n.view+'"' : (n.go ? ' data-go="'+n.go+'"' : ' data-ai="open"');
+      return '<div'+attr+' style="display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:8px;cursor:pointer;color:'+color+';background:'+bg+';font-size:13px;font-weight:'+weight+'"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="'+n.d+'"></path></svg><span>'+n.label+'</span></div>';
     }).join('');
 
     var kpis = crmKpis.map(function(k){
@@ -495,11 +533,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="margin-top:auto;display:flex;align-items:center;gap:8px;padding:10px 9px 0;border-top:1px solid rgba(255,255,255,.08)"><span style="width:7px;height:7px;border-radius:50%;background:#3DDC84;display:inline-block"></span><div><div style="font-size:11px;color:#CFE3D6;font-weight:600">Supabase connected</div><div style="font-size:9.5px;color:#6E9179">Hermes mirrors · live</div></div></div>'
       + '</div>'
       + '<div style="flex:1;min-width:0;overflow:auto;padding:24px 26px">'
-        + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live Supabase model</div>'
-        + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Agency workspace</h1>'
-        + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Clients and Policies are read-only mirrors; Pipeline, Cases, and Tasks write back to Supabase. Renewals and Commissions have their own workspaces.</p>'
-        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">'+kpis+'</div>'
-        + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding-bottom:20px">'+cards+'</div>'
+        + (view !== 'workspace' ? crmTable(view)
+          : '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live Supabase model</div>'
+            + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Agency workspace</h1>'
+            + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Clients and Policies are read-only mirrors; Pipeline, Cases, and Tasks write back to Supabase. Renewals and Commissions have their own workspaces.</p>'
+            + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px">'+kpis+'</div>'
+            + '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding-bottom:20px">'+cards+'</div>')
       + '</div>'
     + '</div>';
   }
@@ -532,7 +571,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
         + '<div style="display:grid;grid-template-columns:1.6fr 1.2fr .9fr .9fr 1fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Renews in</span><span>Status</span><span>Owner</span></div>'
-        + rows
+        + (rows || panelEmpty('renewals', 'renewals'))
       + '</div>'
     + '</div>';
 
@@ -637,7 +676,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
         + '<div style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Case</span><span>Client</span><span>Type</span><span>Tasks</span><span>Age</span><span>Status</span><span>Owner</span></div>'
-        + rows
+        + (rows || panelEmpty('cases', 'cases'))
       + '</div>'
     + '</div>';
 
@@ -714,7 +753,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
         + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Carrier</span><span>Policy</span><span>Client</span><span>Expected</span><span>Received</span><span>Status</span></div>'
-        + rows
+        + (rows || panelEmpty('commissions', 'commission rows'))
       + '</div>'
     + '</div>';
   }
@@ -822,7 +861,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var aiPanelStyle = panelBase + (aiOpen?'transform:translateX(0)':'transform:translateX(112%)');
     var aiScrimStyle = scrimBase + (aiOpen?'opacity:1;pointer-events:auto':'opacity:0;pointer-events:none');
 
-    var chips = ai.chips.map(function(c){ return '<span style="font-size:11.5px;border-radius:999px;padding:5px 11px;cursor:pointer;color:'+ai.accent+';background:'+ai.iconBg+';border:1px solid '+ai.chipBorder+'">'+c+'</span>'; }).join('');
+    var chips = ai.chips.map(function(c){ return '<span data-aichip="'+esc(c)+'" style="font-size:11.5px;border-radius:999px;padding:5px 11px;cursor:pointer;color:'+ai.accent+';background:'+ai.iconBg+';border:1px solid '+ai.chipBorder+'">'+esc(c)+'</span>'; }).join('');
 
     return '<div data-ai="close" style="'+aiScrimStyle+'"></div>'
       + '<div data-ai="open" style="'+aiFabStyle+'">'
@@ -835,18 +874,51 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
           + '<div style="flex:1"><div style="font-family:\'Newsreader\',Georgia,serif;font-size:16px;color:#1B1D22;line-height:1">'+ai.label+'</div><div style="display:flex;align-items:center;gap:5px;margin-top:3px"><span style="width:6px;height:6px;border-radius:50%;display:inline-block;background:'+ai.accent+'"></span><span style="font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:'+ai.accent+'">'+ai.scope+'</span></div></div>'
           + '<div data-ai="close" style="width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#9A9EA6;font-size:17px;background:#F4F5F7">✕</div>'
         + '</div>'
-        + '<div style="flex:1;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">'
-          + '<div style="max-width:230px;background:#F4F5F7;border:1px solid #ECECEA;border-radius:12px 12px 12px 4px;padding:11px 13px;font-size:12.5px;color:#3D4149;line-height:1.45">'+ai.q+'</div>'
-          + '<div style="align-self:flex-end;max-width:255px;border-radius:12px 12px 4px 12px;padding:12px 14px;font-size:12.5px;line-height:1.5;background:'+ai.aBg+';color:'+ai.aColor+'">'
-            + '<div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;margin-bottom:6px;color:'+ai.aAccent+'">'+ai.aTag+'</div>'
-            + ai.a
-          + '</div>'
+        + '<div id="aiLog" style="flex:1;overflow:auto;padding:16px 18px;display:flex;flex-direction:column;gap:14px">'
+          + (aiThread.length
+              ? aiThread.map(function(m){
+                  return m.who==='you'
+                    ? '<div style="max-width:230px;background:#F4F5F7;border:1px solid #ECECEA;border-radius:12px 12px 12px 4px;padding:11px 13px;font-size:12.5px;color:#3D4149;line-height:1.45">'+esc(m.text)+'</div>'
+                    : '<div style="align-self:flex-end;max-width:255px;border-radius:12px 12px 4px 12px;padding:12px 14px;font-size:12.5px;line-height:1.5;white-space:pre-wrap;background:'+ai.aBg+';color:'+ai.aColor+'">'
+                        + '<div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;font-weight:700;margin-bottom:6px;color:'+ai.aAccent+'">Hermes</div>'
+                        + esc(m.text)
+                      + '</div>';
+                }).join('')
+              // No canned exchange. This panel used to open on a hardcoded
+              // question and a hardcoded answer full of invented figures, under
+              // a "Hermes" label — indistinguishable from real analysis.
+              : '<div style="font-size:12.5px;color:#9A9EA6;line-height:1.5;margin:auto 0;text-align:center;padding:0 6px">Ask about '+esc(ai.scope.toLowerCase())+'.<br/>Answers come from live agency data.</div>')
           + '<div style="display:flex;flex-wrap:wrap;gap:7px">'+chips+'</div>'
         + '</div>'
         + '<div style="padding:12px 16px;border-top:1px solid #EFEFEB">'
-          + '<div style="display:flex;align-items:center;gap:9px;background:#F4F5F7;border:1px solid #E6E6E2;border-radius:11px;padding:10px 12px"><span style="flex:1;font-size:12.5px;color:#9A9EA6">'+ai.placeholder+'</span><span style="background:#16233F;color:#fff;font-weight:600;font-size:11.5px;border-radius:7px;padding:5px 12px">Ask</span></div>'
+          + '<div style="display:flex;align-items:center;gap:9px;background:#F4F5F7;border:1px solid #E6E6E2;border-radius:11px;padding:10px 12px">'
+            + '<input id="aiInput"'+(aiBusy?' disabled':'')+' placeholder="'+esc(aiBusy?'Thinking…':ai.placeholder)+'" style="flex:1;min-width:0;border:0;outline:none;background:transparent;font:inherit;font-size:12.5px;color:#1B1D22"/>'
+            + '<span data-ai="send" style="background:#16233F;color:#fff;font-weight:600;font-size:11.5px;border-radius:7px;padding:5px 12px;cursor:pointer;opacity:'+(aiBusy?'.5':'1')+'">Ask</span>'
+          + '</div>'
         + '</div>'
       + '</div>';
+  }
+
+  // ---- Ask Hermes, for real ------------------------------------------------
+  var aiThread = [], aiBusy = false;
+  function askHermes(text){
+    text = (text||'').trim();
+    if(!text || aiBusy) return;
+    aiThread.push({ who:'you', text:text });
+    aiBusy = true; render();
+    fetch('/api/ask', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ prompt:text, hub:state.screen, persona:state.user })
+    })
+      .then(function(r){ return r.json(); })
+      .then(function(d){ aiThread.push({ who:'hermes', text:(d && (d.message || d.detail)) || 'No answer came back.' }); })
+      .catch(function(e){ aiThread.push({ who:'hermes', text:'Couldn\'t reach Hermes — '+((e && e.message) || 'request failed') }); })
+      .then(function(){ aiBusy = false; render(); setTimeout(focusAi, 0); });
+  }
+  function focusAi(){
+    var i = document.getElementById('aiInput'); if(i && !aiBusy) i.focus();
+    var l = document.getElementById('aiLog'); if(l) l.scrollTop = l.scrollHeight;
   }
 
   // ------------------------------------------------------------------
@@ -886,18 +958,50 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
     document.getElementById('app').innerHTML = html;
     if(state.screen==='carrier' && !state.carrierEmbed) wireCarrier();
+    if(state.aiOpen) setTimeout(focusAi, 0);
   }
 
   // ------------------------------------------------------------------
   // Event delegation
   // ------------------------------------------------------------------
+  document.getElementById('app').addEventListener('keydown', function(e){
+    if(e.key==='Enter' && e.target && e.target.id==='aiInput'){
+      e.preventDefault();
+      var q = e.target.value; e.target.value=''; askHermes(q);
+    }
+  });
+
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-go],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
+    // CRM sub-view, either from its own rail or from a workspace card whose
+    // target is written "crm:<view>".
+    if(el.hasAttribute('data-aichip')){
+      askHermes(el.getAttribute('data-aichip'));
+      return;
+    }
+    if(el.getAttribute('data-ai')==='send'){
+      var box = document.getElementById('aiInput');
+      if(box){ var q = box.value; box.value=''; askHermes(q); }
+      return;
+    }
+    if(el.hasAttribute('data-crmview')){
+      var v = el.getAttribute('data-crmview');
+      loadCrmView(v);
+      setState({ screen:'crm', crmView:v, aiOpen:false });
+      return;
+    }
     if(el.hasAttribute('data-go')){
+      var target = el.getAttribute('data-go');
+      if(target.indexOf('crm:') === 0){
+        var sub = target.slice(4);
+        loadCrmView(sub);
+        setState({ screen:'crm', crmView:sub, aiOpen:false });
+        return;
+      }
       selRenewal = null;
-      setState({ screen: el.getAttribute('data-go'), detail:false, caseDetail:false, aiOpen:false, carrierEmbed:false, financeEmbed:false });
+      setState({ screen: target, detail:false, caseDetail:false, aiOpen:false, carrierEmbed:false, financeEmbed:false });
       return;
     }
     if(el.hasAttribute('data-carrier')){
@@ -1022,6 +1126,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     // empty state rather than falling back to fiction.
     tasksByUser.lamar = l;
     tasksByUser.gretchen = g;
+    taskCount = l.length + g.length;
     sources.tasks='live'; return true;
   }
 
@@ -1037,6 +1142,22 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return { carrier:(r.carrier||r.carrier_name||'—'), policy:(r.policy_number||r.policy||'—'), client:(r.client||r.client_name||r.insured||'—'),
                expected:money(exp), received:money(rec), status:st, statusColor:sm[0], statusBg:sm[1] };
     });
+    // Finance KPIs from the same live rows, so the tiles can't drift from the table.
+    var owed=0, received=0, variances=0;
+    list.forEach(function(r){
+      var exp=Number(r.expected_commission!=null?r.expected_commission:(r.expected_amount!=null?r.expected_amount:r.expected))||0;
+      var rec=Number(r.actual_commission!=null?r.actual_commission:(r.actual_amount!=null?r.actual_amount:(r.received!=null?r.received:r.paid_amount)))||0;
+      received += rec;
+      if(exp>rec){ owed += (exp-rec); variances++; }
+      else if(rec>exp){ variances++; }
+    });
+    financeOwed = owed;
+    finKpis = [
+      { label:'Commission owed', value:money(owed), sub:'expected not received', color:'#B9822A' },
+      { label:'Received', value:money(received), sub:'reconciled', color:'#2F6B4F' },
+      { label:'Variances', value:String(variances), sub:'expected \u2260 received', color:'#B4231F' },
+      { label:'Ledger rows', value:String(list.length), sub:'in the book', color:'#1B1D22' },
+    ];
     sources.commissions='live'; return true;
   }
 
@@ -1060,6 +1181,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
                statusColor:overdue?'#B4231F':'#3D4149', statusWeight:overdue?700:500,
                owner:nameFromEmail(r.owner_email||r.owner||r.assignee) };
     });
+    var ages = caseRows.map(function(c){ return parseInt(c.age,10); }).filter(function(v){ return !isNaN(v); });
+    var avg = ages.length ? Math.round(ages.reduce(function(a,b){return a+b;},0)/ages.length) : null;
+    detailFacts = [
+      { label:'Open cases', value:String(caseRows.length), sub:'agency service work', color:'#1B1D22' },
+      { label:'Avg age', value:(avg!=null?avg+'d':'\u2014'), sub:'open cases', color:'#2F6B4F' },
+    ];
     sources.cases='live'; return true;
   }
 
@@ -1072,11 +1199,65 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   function fetchLive(){
     // Tasks are now served from Supabase (agency_crm_tasks) — the dead-Espo path
     // was repointed 2026-07-24, so /api/tasks is safe to call again.
-    pull('/api/renewals').then(function(d){ if(applyRenewals(d)) render(); });
-    pull('/api/tasks').then(function(d){ if(applyTasks(d)) render(); });
-    pull('/api/commissions').then(function(d){ if(applyCommissions(d)) render(); });
-    pull('/api/cases').then(function(d){ if(applyCases(d)) render(); });
+    pull('/api/renewals').then(function(d){ if(applyRenewals(d)){ homeFromLive(); render(); } });
+    pull('/api/tasks').then(function(d){ if(applyTasks(d)){ homeFromLive(); render(); } });
+    pull('/api/commissions').then(function(d){ if(applyCommissions(d)){ homeFromLive(); render(); } });
+    pull('/api/cases').then(function(d){ if(applyCases(d)){ homeFromLive(); render(); } });
     pull('/api/carriers').then(function(d){ if(applyCarriers(d)) render(); });
+    pull('/api/workspace-stats').then(function(d){ if(applyWorkspaceStats(d)) render(); });
+  }
+
+  // The CRM screen's counts. These were hardcoded — '414' clients and '614'
+  // policies against a book that actually holds 441 — so the screen looked
+  // authoritative while being decorative.
+  function applyWorkspaceStats(d){
+    if(!d || d._error) return false;
+    var n = function(v){ return v==null ? '—' : Number(v).toLocaleString('en-US'); };
+    crmKpis = [
+      { label:'Clients', value:n(d.clients), sub:'canonical' },
+      { label:'Policies', value:n(d.policies), sub:(d.annualized_premium!=null?money(d.annualized_premium)+' annualized':'annualized') },
+      { label:'Renewals', value:n(d.renewals), sub:'need attention' },
+      { label:'Pipeline', value:n(d.pipeline), sub:'open opportunities' },
+      { label:'Open cases', value:n(d.open_cases), sub:'service work' },
+      { label:'Open tasks', value:n(d.open_tasks), sub:'case-linked' },
+    ];
+    crmCardsRaw = [
+      { name:'Clients', count:n(d.clients), desc:'NowCerts insured records', to:'crm:clients' },
+      { name:'Policies', count:n(d.policies), desc:'Coverage & premium mirrors', to:'crm:policies' },
+      { name:'Renewals', count:n(d.renewals), desc:'Own workspace ↗', to:'renewals' },
+      { name:'Commissions', count:n(d.commissions), desc:'Reconcile in Finance', to:'finance' },
+      { name:'Pipeline', count:n(d.pipeline), desc:'Quote-to-bind workflow', to:'crm:pipeline' },
+      { name:'Cases', count:n(d.open_cases), desc:'Agency service work ↗', to:'cases' },
+    ];
+    sources.workspace = 'live';
+    return true;
+  }
+
+  // Home's tiles are a roll-up of what the other panels already fetched, so they
+  // only ever show a number that actually came back from the API.
+  function homeFromLive(){
+    homeKpis = [
+      { label:'Renewals due', value:(sources.renewals==='live'?String(renewalRows.length):'—'), sub:'need attention', color:'#2F6B4F' },
+      { label:'Money to chase', value:(financeOwed!=null?money(financeOwed):'—'), sub:'commission shorts', color:'#B9822A' },
+      { label:'Open cases', value:(sources.cases==='live'?String(caseRows.length):'—'), sub:'agency service work', color:'#16233F' },
+      { label:'Open tasks', value:(sources.tasks==='live'?String(taskCount):'—'), sub:'across the team', color:'#0F7B6C' },
+    ];
+  }
+
+  // ---- CRM sub-views (Clients / Policies / Pipeline / Leads) ----------------
+  function loadCrmView(key){
+    var cfg = CRM_VIEWS[key];
+    if(!cfg || !cfg.endpoint || crmData[key]) return;
+    crmData[key] = { loading:true };
+    render();
+    pull(cfg.endpoint).then(function(d){
+      if(!d || d._error){ crmData[key] = { error:(d && d._error) || 'no response' }; }
+      else {
+        var rows = Array.isArray(d) ? d : (Array.isArray(d[cfg.key]) ? d[cfg.key] : null);
+        crmData[key] = rows ? { rows:rows } : { error:'unexpected response shape' };
+      }
+      render();
+    });
   }
 
   function applyCarriers(d){
