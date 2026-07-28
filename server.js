@@ -127,6 +127,15 @@ const WRITE_ROUTES = [
   // not writable here or anywhere else.
   { m: 'PATCH',  re: /^\/api\/renewals\/([0-9a-f-]{36})$/ },
 
+  // The lead station. Leads are CRM-owned and never reach NowCerts from here —
+  // converting one opens a pipeline deal, which itself only writes to the AMS
+  // when it is won. So nothing on these lines can touch the system of record.
+  { m: 'POST',   re: /^\/api\/leads$/ },
+  { m: 'PATCH',  re: /^\/api\/leads\/([0-9a-f-]{36})$/ },
+  { m: 'DELETE', re: /^\/api\/leads\/([0-9a-f-]{36})$/ },
+  { m: 'POST',   re: /^\/api\/leads\/([0-9a-f-]{36})\/notes$/ },
+  { m: 'POST',   re: /^\/api\/leads\/([0-9a-f-]{36})\/convert$/ },
+
   // Pipeline — create and move deals.
   { m: 'POST',   re: /^\/api\/opportunities$/ },
   { m: 'PATCH',  re: /^\/api\/opportunities\/([0-9a-f-]{36})$/ },
@@ -180,6 +189,8 @@ const READ_PATTERNS = [
   // the backend cannot disagree about what a stage is.
   { re: /^\/api\/pipeline\/stages$/ },
   { re: /^\/api\/case-templates$/ },
+  // One lead, with everything said to them so far.
+  { re: /^\/api\/leads\/([0-9a-f-]{36})$/ },
   // Client 360 — the record plus their policies, cases, tasks and opportunities.
   { re: /^\/api\/clients\/([0-9a-f-]{36})$/ },
   { re: /^\/api\/cases\/([0-9a-f-]{36})\/progress$/ },

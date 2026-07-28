@@ -215,9 +215,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
                  // a list of names. Next action stays — it is the whole point.
                  cols:[['insured_name','Client'],['opportunity_type','Pipeline','dealtype'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['projected_close_date','Close','closedate'],['expiration_date','X-date','date'],['next_action','Next action']] },
     // X-date is what ranks a lead — it is the date their current cover runs out,
-    // and it is the reason to call today rather than in March.
+    // and it is the reason to call today rather than in March. `source` says
+    // whether this is one of ours (workable) or a NowCerts prospect (read-only).
     leads:     { label:'Leads',    endpoint:'/api/leads',    key:'leads',
-                 cols:[['name','Lead'],['prospect_type','Type'],['x_date','X-date','date'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
+                 cols:[['name','Lead'],['source','Held in','source'],['status','Status','chip'],['x_date','X-date','date'],['owner_email','Owner','person'],['next_action','Next action'],['phone','Phone']] },
     quotes:    { label:'Quotes',   endpoint:'/api/quotes',   key:'quotes',
                  cols:[['insured_name','Client'],['line_of_business','LOB'],['carrier','Carrier'],['premium','Premium','money'],['quote_number','Quote #'],['effective_date','Effective','date'],['status','Status','chip']] },
     cases:     { label:'Cases',    endpoint:'/api/cases',    key:'cases',
@@ -238,7 +239,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // One in-progress buffer per editable surface: field -> typed value, before it
   // is saved. Several can be open at once (a client, one of their policies, and
   // a task on the same screen), so they are kept apart rather than pooled.
-  var edits = { client:{}, policy:{}, work:{}, renewal:{}, deal:{} };
+  var edits = { client:{}, policy:{}, work:{}, renewal:{}, deal:{}, lead:{} };
+  var leadOpen = null;        // crm_leads id being worked, or 'new'
+  var leadDraft = {};         // the record a 'new' lead is built into
+  var leadData = null;        // {lead, notes} for the open lead
+  var leadNoteDraft = '';     // the note being typed, kept across re-renders
   var dealOpen = null;        // opportunity id being edited, or 'new'
   var dealDraft = {};         // the record a 'new' deal is built into
   var policyDraft = {};       // ditto for a new policy
@@ -537,6 +542,15 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · '+(overdueWord||'overdue')+'</span>';
     return esc(txt);
   }
+  function sourceChip(v){
+    var ams = String(v||'') === 'nowcerts';
+    return '<span title="'+(ams ? 'A prospect created in NowCerts. Read-only here.'
+                                : 'A lead the agency holds in the CRM. Never sent to NowCerts.')
+      + '" style="font-size:10.5px;font-weight:700;border-radius:999px;padding:2px 8px;white-space:nowrap;'
+      + (ams ? 'color:#B9822A;background:#F7EEDB' : 'color:#2F6B4F;background:#EAF1EC')+'">'
+      + (ams ? 'NowCerts' : 'CRM') + '</span>';
+  }
+
   // A policy's term, as a period. "Renews in 30 days" reads very differently on a
   // policy written last month than on one that has been in force a year, and the
   // renewal list has never shown the start of the term at all.
@@ -577,6 +591,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     // one — but marked, because a date nobody chose is not a commitment.
     else if(fmt==='closedate') txt = closeHtml(r, v);
     else if(fmt==='person') txt = (v ? esc(nameFromEmail(v)) : '—');
+    // Where a lead is held. Ours can be worked; a NowCerts prospect is read-only
+    // here, and saying so is kinder than a card that refuses to save.
+    else if(fmt==='source') txt = sourceChip(v);
     // Renewal work vs acquisition work — the table's version of the board's
     // two ladders, so the distinction survives when you sort or page.
     else if(fmt==='dealtype') txt = (v ? dealTypeChip(r) : '—');
@@ -972,6 +989,214 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + (r.carrier ? '<div style="font-size:11px;color:#9A9EA6;margin-top:2px">'+esc(r.carrier)+'</div>' : '')
       + (r.opportunity_type && r.opportunity_type !== 'New Business' && !isRenewalDeal(r)
           ? '<div style="margin-top:6px">'+dealTypeChip(r)+'</div>' : '')
+    + '</div>';
+  }
+
+  // ---- The lead station -----------------------------------------------------
+  // A lead is someone worth calling who is not yet a deal. They are held HERE and
+  // never sent to NowCerts: a name from a networking event is not a record of
+  // insurance. A lead reaches the AMS by becoming a deal and that deal being won.
+  var LEAD_STATUSES = ['new','working','quoted','converted','lost'];
+  var LEAD_TYPES = ['', 'Personal', 'Commercial'];
+  var LEAD_FIELDS = [
+    ['name','Name', {wide:true}], ['company','Company'], ['lead_type','Type', {options:LEAD_TYPES}],
+    ['phone','Phone'], ['email','Email'],
+    ['city','City'], ['state','State'],
+    ['lines_of_business','Lines wanted'], ['premium_estimate','Premium estimate'],
+    // The x-date is the whole reason a lead has a deadline.
+    ['x_date','X-date (current cover expires)', {date:true}],
+    ['status','Status', {options:LEAD_STATUSES}],
+    ['owner_email','Owner'], ['lead_source','Source'],
+    ['next_action','Next action'], ['next_action_date','Next action on', {date:true}],
+  ];
+
+  function leadRecord(){
+    if (leadOpen === 'new') return leadDraft;
+    return (leadData && leadData.lead) || null;
+  }
+
+  function openLead(id){
+    leadOpen = id; leadData = null; edits.lead = {}; leadNoteDraft = '';
+    render();
+    pull('/api/leads/'+encodeURIComponent(id)).then(function(d){
+      if (d && !d._error) leadData = d;
+      render();
+    });
+  }
+
+  function closeLead(){
+    if (!leadOpen) return true;
+    var pending = Object.keys(edits.lead).length
+      + (leadOpen === 'new' ? Object.keys(leadDraft).length : 0);
+    if (!unsavedOk(pending)) return false;
+    leadOpen = null; leadData = null; edits.lead = {}; leadDraft = {}; leadNoteDraft = '';
+    render();
+    return true;
+  }
+
+  function leadBody(src){
+    var body = {};
+    Object.keys(src).forEach(function(k){ body[k] = src[k] === '' ? null : src[k]; });
+    if (body.premium_estimate != null) {
+      body.premium_estimate = parseFloat(String(body.premium_estimate).replace(/[^0-9.\-]/g,''));
+    }
+    return body;
+  }
+
+  function saveLeadEdits(){
+    var rec = leadRecord(), fields = Object.keys(edits.lead);
+    if (!rec || !rec.id || !fields.length) return;
+    fetch('/api/leads/'+encodeURIComponent(rec.id), {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(leadBody(edits.lead))
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That change was refused:\n' + JSON.stringify(err)); return; }
+      edits.lead = {};
+      openLead(rec.id);
+      loadCrmView('leads', true);
+    }).catch(saveUnreachable);
+  }
+
+  function createLead(){
+    var d = Object.assign({}, leadDraft, edits.lead);
+    if (!String(d.name || '').trim()) { alert('A lead needs a name.'); return; }
+    var body = leadBody(d);
+    body.created_by_email = actingAs();
+    fetch('/api/leads', { method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify(body) })
+      .then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        if (!res.ok) { alert('That lead was refused:\n' + JSON.stringify(res.j.detail || res.j)); return; }
+        leadDraft = {}; edits.lead = {};
+        loadCrmView('leads', true);
+        openLead(res.j.lead.id);
+      }).catch(saveUnreachable);
+  }
+
+  function addLeadNote(){
+    var rec = leadRecord();
+    var text = String(leadNoteDraft || '').trim();
+    if (!rec || !rec.id || !text) return;
+    fetch('/api/leads/'+encodeURIComponent(rec.id)+'/notes', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ body:text, author_email:actingAs() })
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That note was refused:\n' + JSON.stringify(err)); return; }
+      leadNoteDraft = '';
+      openLead(rec.id);
+    }).catch(saveUnreachable);
+  }
+
+  function convertLead(){
+    var rec = leadRecord();
+    if (!rec || !rec.id) return;
+    var lob = prompt('Open a deal on ' + (rec.company || rec.name) + '.\n\n'
+                   + 'Which line of business?', rec.lines_of_business || '');
+    if (!lob || !lob.trim()) return;
+    fetch('/api/leads/'+encodeURIComponent(rec.id)+'/convert', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ line_of_business: lob.trim(), created_by: actingAs(),
+                             assigned_to_email: rec.owner_email || actingAs() })
+    }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        if (!res.ok) { alert('That conversion was refused:\n' + JSON.stringify(res.j.detail || res.j)); return; }
+        // Say what happened and where it went — a deal that vanishes into another
+        // screen with no acknowledgement reads as a failure.
+        alert('Deal opened on the pipeline for ' + lob.trim() + '.\n\n'
+            + 'The lead stays here with its notes. Nothing has been sent to NowCerts —\n'
+            + 'the deal reaches the AMS if and when it is won.');
+        loadCrmView('leads', true);
+        openLead(rec.id);
+      }).catch(saveUnreachable);
+  }
+
+  function deleteLead(){
+    var rec = leadRecord();
+    if (!rec || !rec.id) return;
+    if (!confirm('Delete ' + (rec.name || 'this lead') + '?\n\n'
+               + 'Their notes go too. If they simply bought elsewhere, set the status to\n'
+               + '"lost" instead — the x-date is next year\'s call.\n\nThis cannot be undone.')) return;
+    fetch('/api/leads/'+encodeURIComponent(rec.id), {
+      method:'DELETE', headers:{'Content-Type':'application/json'}
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That lead was not deleted:\n' + JSON.stringify(err)); return; }
+      leadOpen = null; leadData = null; edits.lead = {};
+      loadCrmView('leads', true);
+    }).catch(saveUnreachable);
+  }
+
+  function renderLeadCard(){
+    if (!leadOpen) return '';
+    var isNew = leadOpen === 'new';
+    var rec = leadRecord();
+    if (!rec && !isNew) {
+      return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px;'
+        + 'font-size:12.5px;color:#96999F">Loading lead…</div>';
+    }
+    var converted = rec && rec.status === 'converted';
+
+    var actions = isNew
+      ? '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span data-edit="lead:create" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Add lead</span>'
+        + '<span data-edit="lead:close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
+      + '</div>'
+      : cardActions('lead',
+          '<span data-edit="lead:convert" title="Open a pipeline deal on this lead"'
+          + ' style="font-size:12px;font-weight:600;border-radius:8px;padding:7px 13px;cursor:pointer;'
+          + (converted ? 'color:#6B7078;background:#F1F1EE' : 'color:#fff;background:#16233F')+'">'
+          + (converted ? 'Convert again' : 'Convert to deal →') + '</span>'
+          + '<span data-edit="lead:delete" style="font-size:12px;color:#B4231F;cursor:pointer">Delete</span>');
+
+    var notes = (leadData && leadData.notes) || [];
+    var noteList = notes.length
+      ? notes.map(function(n){
+          return '<div style="padding:9px 0;border-top:1px solid #F2F2EE">'
+            + '<div style="font-size:12.5px;color:#25282E;line-height:1.45;white-space:pre-wrap">'+esc(n.body)+'</div>'
+            + '<div style="font-size:11px;color:#9A9EA6;margin-top:3px">'
+              + esc(n.author_email ? nameFromEmail(n.author_email) : 'someone') + ' · ' + dueHtml(n.created_at)
+            + '</div>'
+          + '</div>';
+        }).join('')
+      : '<div style="padding:10px 0;font-size:12px;color:#B4B7BD">Nothing written down yet.</div>';
+
+    var notesBlock = isNew
+      ? ''
+      : '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #EFEFEB">'
+        + '<div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700;margin-bottom:6px">'
+          + 'Notes <span style="color:#B7BAC0">'+notes.length+'</span></div>'
+        + '<div style="display:flex;gap:8px;align-items:flex-start">'
+          + '<textarea data-leadnote="1" rows="2" placeholder="What was said?" style="flex:1;border:1px solid #E6E6E2;border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;color:#25282E;resize:vertical;line-height:1.45">'+esc(leadNoteDraft)+'</textarea>'
+          + '<span data-edit="lead:note" style="font-size:12px;font-weight:600;border-radius:8px;padding:8px 13px;cursor:pointer;'
+            + (leadNoteDraft.trim() ? 'color:#fff;background:#2F6B4F' : 'color:#B7BAC0;background:#F1F1EE')+'">Add note</span>'
+        + '</div>'
+        + noteList
+      + '</div>';
+
+    var linked = (rec && rec.converted_opportunity_id)
+      ? '<div style="grid-column:1/-1;font-size:11.5px;color:#2F6B4F;background:#EAF1EC;border-radius:8px;padding:8px 11px">'
+        + 'Converted — this lead is on the pipeline. It stays here with its notes, so the '
+        + 'cross-sell next year has something to work from.</div>'
+      : '';
+
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">'
+          + (isNew ? 'New lead' : esc(rec.name || 'Lead')) + '</span>'
+        + actions
+      + '</div>'
+      + '<div style="font-size:11.5px;color:#9A9EA6;margin-bottom:12px">'
+        + 'Held in the CRM. Nothing here is sent to NowCerts.</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
+        + linked
+        + LEAD_FIELDS.map(function(f){ return editField('lead', rec || {}, f[0], f[1], f[2]); }).join('')
+      + '</div>'
+      + notesBlock
     + '</div>';
   }
 
@@ -1797,6 +2022,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
           open = ' data-work="'+(key === 'tasks' ? 'task' : 'case')+':'+esc(r.id)+'" style="cursor:pointer;';
         } else if (key === 'pipeline' && r.id) {
           open = ' data-deal="'+esc(r.id)+'" style="cursor:pointer;';
+        // Only OUR leads open — a NowCerts prospect has no CRM row to edit.
+        } else if (key === 'leads' && r.id && r.source !== 'nowcerts') {
+          open = ' data-lead="'+esc(r.id)+'" style="cursor:pointer;';
         } else if (key === 'policies' && r.policy_guid) {
           open = ' data-policyrow="'+esc(r.policy_guid)+'" style="cursor:pointer;';
         }
@@ -1810,6 +2038,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if (workOpen && (key === 'cases' || key === 'tasks')
         && workOpen.kind === (key === 'tasks' ? 'task' : 'case')) card = renderWorkCard();
     else if (key === 'pipeline') card = renderDealCard();
+    else if (key === 'leads' && leadOpen) card = renderLeadCard();
     else if (key === 'policies' && policyOpen) card = renderPolicyCard();
     if (card) card = '<div style="margin-bottom:16px">' + card + '</div>';
 
@@ -1841,6 +2070,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>';
     } else if (key === 'policies') {
       addBtn = '<span data-policyrow="new" style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:8px;padding:7px 13px;cursor:pointer">Add policy +</span>';
+    } else if (key === 'leads') {
+      // If the NowCerts half of the list failed, say so. A short list that looks
+      // complete is worse than a short list that admits what is missing.
+      var lerr = (d.rows && d.raw && d.raw.ams_error) ? d.raw.ams_error : null;
+      addBtn = '<div style="display:flex;align-items:center;gap:10px">'
+        + (lerr ? '<span title="'+esc(lerr)+'" style="font-size:11.5px;color:#B9822A">NowCerts prospects unavailable — showing ours only</span>' : '')
+        + '<span data-lead="new" style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:8px;padding:7px 13px;cursor:pointer">Add lead +</span>'
+      + '</div>';
     }
 
     var listBlock = (key === 'pipeline' && pipelineBoard)
@@ -2378,12 +2615,26 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if (kind === 'work') return workRecord() || {};
     if (kind === 'renewal') return selRenewal || {};
     if (kind === 'deal') return dealRecord() || {};
+    if (kind === 'lead') return leadRecord() || {};
     return {};
   }
 
   document.getElementById('app').addEventListener('input', function(e){
     var t = e.target;
     if(!t || !t.getAttribute) return;
+    // The note box is not a record field — it is held on its own so a re-render
+    // (which the Add-note button's enabled state triggers) does not lose it.
+    if(t.getAttribute('data-leadnote')){
+      var had = leadNoteDraft.trim().length > 0;
+      leadNoteDraft = t.value;
+      if((leadNoteDraft.trim().length > 0) !== had){
+        var at = t.selectionStart;
+        render();
+        var again = document.querySelector('[data-leadnote]');
+        if(again){ again.focus(); try{ again.setSelectionRange(at, at); }catch(err){} }
+      }
+      return;
+    }
     var id = t.getAttribute('data-efield');
     if(!id) return;
     var parts = id.split(':'), kind = parts[0], f = parts[1];
@@ -2431,6 +2682,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(workOpen) return closeWork();
     if(policyOpen) return closePolicy(false);
     if(dealOpen) return closeDeal();
+    if(leadOpen) return closeLead();
     // Renewal detail: its own edit buffer, so it asks like the rest.
     if(state.screen === 'renewals' && state.detail){
       if(!unsavedOk(Object.keys(edits.renewal).length)) return false;
@@ -2458,7 +2710,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
@@ -2505,6 +2757,15 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       dealOpen = dv; render();
       return;
     }
+    // A lead on the Leads list, or "new".
+    if(el.hasAttribute('data-lead')){
+      var lv = el.getAttribute('data-lead');
+      if (lv === 'new') { if (closeLead()) { leadOpen = 'new'; leadDraft = {}; render(); } return; }
+      if (leadOpen && String(leadOpen) === lv) return;
+      if (!closeLead()) return;
+      openLead(lv);
+      return;
+    }
     // A policy row on the Policies list, or "new".
     if(el.hasAttribute('data-policyrow')){
       var pv = el.getAttribute('data-policyrow');
@@ -2531,6 +2792,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         else if(ek === 'policy') closePolicy(false);
         else if(ek === 'work') closeWork();
         else if(ek === 'deal') closeDeal();
+        else if(ek === 'lead') closeLead();
         else { edits[ek] = {}; render(); }
         return;
       }
@@ -2540,15 +2802,19 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         else if(ek === 'work') saveWorkEdits();
         else if(ek === 'renewal') saveRenewalEdits();
         else if(ek === 'deal') saveDealEdits();
+        else if(ek === 'lead') saveLeadEdits();
         return;
       }
       if(act === 'create'){
         if(ek === 'policy') createPolicy();
         else if(ek === 'deal') createDeal();
+        else if(ek === 'lead') createLead();
         return;
       }
+      if(act === 'note'){ addLeadNote(); return; }
+      if(act === 'convert'){ convertLead(); return; }
       if(act === 'finish'){ finishWork(); return; }
-      if(act === 'delete'){ deleteWork(); return; }
+      if(act === 'delete'){ (ek === 'lead' ? deleteLead : deleteWork)(); return; }
       return;
     }
     // A row on the Cases screen: hand it to the CRM's case card, which is the
@@ -2883,7 +3149,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if(!d || d._error){ crmData[key] = { error:(d && d._error) || 'no response' }; }
       else {
         var rows = Array.isArray(d) ? d : (Array.isArray(d[cfg.key]) ? d[cfg.key] : null);
-        crmData[key] = rows ? { rows:rows } : { error:'unexpected response shape' };
+        // `raw` keeps whatever else the endpoint said alongside the rows — the
+        // leads list reports a partial result (ams_error) rather than passing a
+        // half-list off as the whole one.
+        crmData[key] = rows ? { rows:rows, raw:d } : { error:'unexpected response shape' };
       }
       render();
     });
