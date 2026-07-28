@@ -132,15 +132,30 @@ const WRITE_ROUTES = [
   { m: 'PATCH',  re: /^\/api\/opportunities\/([0-9a-f-]{36})$/ },
   { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/stage$/ },
 
-  // Correct a client field. An override, not an AMS write: it outranks the
-  // synced value until NowCerts reports the same thing. Write-back to the AMS
-  // is a separate decision and deliberately not wired here.
+  // Correct a client or policy field. An override: it outranks the synced value
+  // until NowCerts reports the same thing. The NowCerts identifiers are kept out
+  // of reach by the backend's allowlist, not by these lines.
   { m: 'POST',   re: /^\/api\/clients\/([0-9a-f-]{36})\/override$/ },
-
-  // Same for a policy field. What keeps the NowCerts identifiers (policy guid,
-  // insured guid, renewed_policy, policy number) out of reach is the backend's
-  // allowlist, not this line — this only says corrections may be attempted.
   { m: 'POST',   re: /^\/api\/policies\/([0-9a-f-]{36})\/override$/ },
+
+  // Push a saved correction ON to NowCerts, keyed on the record's AMS GUID.
+  //
+  // The header above used to say AMS endpoints stay behind their approval flows,
+  // so it is worth being explicit about what changed. The portal still has no
+  // login, and anyone on the tailnet can now cause a write to the system of
+  // record. That was a deliberate decision (2026-07-28) and it rests on three
+  // things holding: the backend refuses any field outside its own allowlist, so
+  // identifiers can never be rewritten; it refuses to write at all unless it can
+  // first read that record back out of NowCerts by GUID, so a bad id cannot mint
+  // a duplicate insured; and every push leaves a queue row plus a
+  // portal_write_log entry naming who did it. Commission and ledger endpoints
+  // are still absent, and still answer 405.
+  { m: 'POST',   re: /^\/api\/clients\/([0-9a-f-]{36})\/push-to-ams$/ },
+  { m: 'POST',   re: /^\/api\/policies\/([0-9a-f-]{36})\/push-to-ams$/ },
+
+  // Add a policy — created in NowCerts (the AMS owns what is bound), against an
+  // insured the AMS confirms exists.
+  { m: 'POST',   re: /^\/api\/policies$/ },
 
   // Retry a stuck sync job — recovery, not a new write.
   { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ },
@@ -155,6 +170,9 @@ const WRITE_ROUTES = [
 
 // Read routes that take a path parameter, so they can't live in the flat ROUTES map.
 const READ_PATTERNS = [
+  // Kanban columns. Same source as the stage-move validation, so the board and
+  // the backend cannot disagree about what a stage is.
+  { re: /^\/api\/pipeline\/stages$/ },
   { re: /^\/api\/case-templates$/ },
   // Client 360 — the record plus their policies, cases, tasks and opportunities.
   { re: /^\/api\/clients\/([0-9a-f-]{36})$/ },
