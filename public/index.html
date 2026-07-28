@@ -2600,6 +2600,60 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
     navigator.serviceWorker.register('/sw.js').catch(function(){ /* non-fatal */ });
   });
 }
+
+// ---------------------------------------------------------------------------
+// "There is a newer version" — the app-window problem.
+//
+// Navigations are network-first, so a reload always gets the current build. The
+// gap is that nothing navigates: an installed app window sits open for days on
+// a dashboard the person believes is live, and never learns a deploy happened.
+//
+// So ask. A HEAD against the page returns X-Portal-Build (its mtime); when that
+// differs from the one this window loaded with, OFFER a reload rather than
+// forcing one — these screens hold half-typed corrections, and a dashboard that
+// reloads itself out from under someone is worse than a stale one.
+// ---------------------------------------------------------------------------
+(function(){
+  var CHECK_MS = 120000;
+  var loaded = null, offered = false;
+
+  function offer(){
+    if (offered || document.getElementById('pwaUpdateBar')) return;
+    offered = true;
+    var bar = document.createElement('div');
+    bar.id = 'pwaUpdateBar';
+    bar.setAttribute('role', 'status');
+    bar.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:22px;z-index:9999;'
+      + 'display:flex;align-items:center;gap:12px;background:#16233F;color:#fff;border-radius:999px;'
+      + 'padding:10px 14px 10px 18px;box-shadow:0 10px 30px rgba(18,23,40,.28);font-size:12.5px';
+    bar.innerHTML = '<span>A newer version of the portal is available.</span>'
+      + '<span id="pwaReload" style="font-weight:600;background:#fff;color:#16233F;border-radius:999px;padding:6px 13px;cursor:pointer">Reload</span>'
+      + '<span id="pwaLater" title="Not now" style="opacity:.65;cursor:pointer;padding:0 4px">\u2715</span>';
+    document.body.appendChild(bar);
+    bar.querySelector('#pwaReload').onclick = function(){ location.reload(); };
+    bar.querySelector('#pwaLater').onclick = function(){
+      bar.remove();
+      // Dismissed means "not now", not "never": re-baseline so the NEXT deploy
+      // asks again, instead of this window going quiet forever.
+      offered = false; loaded = null;
+    };
+  }
+
+  function check(){
+    if (document.hidden) return;               // don't poll a background window
+    fetch('/', { method:'HEAD', cache:'no-store' }).then(function(res){
+      var s = res.headers.get('X-Portal-Build');
+      if (!s) return;                          // older server: nothing to compare
+      if (loaded === null) { loaded = s; return; }
+      if (s !== loaded) offer();
+    }).catch(function(){ /* offline or off-tailnet \u2014 nothing useful to say */ });
+  }
+
+  check();
+  setInterval(check, CHECK_MS);
+  // A window that has just been woken is the likeliest one to be out of date.
+  document.addEventListener('visibilitychange', function(){ if (!document.hidden) check(); });
+})();
 </script>
 </body>
 </html>
