@@ -157,6 +157,10 @@ const WRITE_ROUTES = [
   // insured the AMS confirms exists.
   { m: 'POST',   re: /^\/api\/policies$/ },
 
+  // Re-drive a correction that never reached NowCerts. Recovery of a write that
+  // was already approved once, replayed from its own queue row — not a new one.
+  { m: 'POST',   re: /^\/api\/ams\/failed-pushes\/([0-9a-f-]{36})\/retry$/ },
+
   // Retry a stuck sync job — recovery, not a new write.
   { m: 'POST',   re: /^\/api\/queue\/([0-9a-f-]{36})\/retry$/ },
 
@@ -170,6 +174,8 @@ const WRITE_ROUTES = [
 
 // Read routes that take a path parameter, so they can't live in the flat ROUTES map.
 const READ_PATTERNS = [
+  // Corrections that never landed in the AMS — the portal's banner.
+  { re: /^\/api\/ams\/failed-pushes$/ },
   // Kanban columns. Same source as the stage-move validation, so the board and
   // the backend cannot disagree about what a stage is.
   { re: /^\/api\/pipeline\/stages$/ },

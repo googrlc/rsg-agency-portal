@@ -936,9 +936,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:11.5px;color:#96999F">Saving a correction also writes it to NowCerts — it will ask first</span>'
       + '</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:27px;color:#1B1D22;margin:6px 0 2px;font-weight:500">'+esc(rec.insured_name || '—')+'</h1>'
-      + '<div style="font-size:12.5px;color:#787C84;margin-bottom:3px">'+esc(rec.client_type || '—')
+      + '<div style="display:flex;align-items:center;gap:9px;margin-bottom:3px">'
+        + '<span style="font-size:12.5px;color:#787C84">'+esc(rec.client_type || '—')
         + ' · '+d.counts.policies+' policies · '+d.counts.cases+' cases · '+d.counts.tasks+' tasks'
-        + ' · '+d.counts.opportunities+' opportunities</div>'
+        + ' · '+d.counts.opportunities+' opportunities</span>'
+        + liveBadge(rec)
+      + '</div>'
       + '<div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#A6A9AF;'
         + 'user-select:all;margin-bottom:18px" title="NowCerts insured ID — read-only">'
         + esc(rec.nowcerts_insured_guid || '') + '</div>'
@@ -1352,8 +1355,59 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var PAGE_SIZE = 50;
 
   function listFor(key){
-    if (!listState[key]) listState[key] = { sort:null, dir:1, page:0 };
+    if (!listState[key]) listState[key] = { sort:null, dir:1, page:0, live:'all' };
     return listState[key];
+  }
+
+  // ---- Active vs inactive ---------------------------------------------------
+  // Read-only, here and in the backend. canonical_clients.active is recomputed
+  // by a database trigger from that client's policies whenever one is bound or
+  // cancelled, and a policy's active follows its own status. So this filters and
+  // labels; it never offers to set the flag. The lever is the policy — cancel a
+  // client's last live policy in the AMS and the client goes inactive on its own.
+  //
+  // Deliberately no client-side recomputation from the policy list. "Active"
+  // means one thing, defined in one place, and a second definition in the
+  // browser is how the screen and the database start disagreeing.
+  //
+  // A row with no `active` column counts as active rather than being hidden: a
+  // list that silently drops records it cannot classify is worse than one that
+  // shows them.
+  function isActive(r){ return r.active !== false; }
+
+  function liveFilter(key, rows){
+    var st = listFor(key);
+    if (st.live === 'active') return rows.filter(isActive);
+    if (st.live === 'inactive') return rows.filter(function(r){ return !isActive(r); });
+    return rows;
+  }
+
+  // Only offered where the data carries the flag — a filter permanently reading
+  // "0 inactive" teaches people to ignore it.
+  function liveChips(key, rows){
+    if (!rows || !rows.length || !rows.some(function(r){ return 'active' in r; })) return '';
+    var st = listFor(key);
+    var on = rows.filter(isActive).length, off = rows.length - on;
+    var chip = function(v, label, n){
+      var sel = st.live === v;
+      return '<span data-live="'+key+':'+v+'" style="font-size:12px;font-weight:600;border-radius:999px;padding:5px 13px;cursor:pointer;'
+        + (sel ? 'color:#fff;background:#3D4149' : 'color:#3D4149;background:#fff;border:1px solid #E6E6E2')+'">'
+        + label + ' · ' + n.toLocaleString('en-US') + '</span>';
+    };
+    return '<div style="display:flex;gap:7px;margin-bottom:12px">'
+      + chip('all','All', rows.length) + chip('active','Active', on)
+      + chip('inactive','Inactive', off)
+      + (off && st.live === 'inactive'
+          ? '<span style="font-size:11.5px;color:#96999F;align-self:center;margin-left:4px">No live policy — the win-back list.</span>' : '')
+    + '</div>';
+  }
+
+  // The flag itself, wherever a record is shown.
+  function liveBadge(r){
+    if (!r || !('active' in r)) return '';
+    return isActive(r)
+      ? '<span title="Has at least one live policy. Derived — not editable." style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 9px;color:#2F6B4F;background:#EAF1EC">Active</span>'
+      : '<span title="No live policy. Derived from this client\'s policies — not editable." style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 9px;color:#6B7078;background:#EFEFEC">Inactive</span>';
   }
 
   // Sort by what the column MEANS, not by how it reads: money and premiums
@@ -1413,6 +1467,59 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+
+  // ---- Corrections that never reached NowCerts -------------------------------
+  // Worth a banner rather than a log line: the CRM shows the corrected value
+  // either way, so a push that failed is invisible on the very screen someone
+  // would go to to check it. Retrying is safe to repeat — both AMS endpoints
+  // upsert on the record's GUID.
+  var failedPushes = [];
+
+  function loadFailedPushes(){
+    pull('/api/ams/failed-pushes').then(function(d){
+      if (!d || d._error || d.unavailable) return;
+      var next = d.failed || [];
+      var changed = next.length !== failedPushes.length;
+      failedPushes = next;
+      if (changed) render();
+    });
+  }
+
+  function renderFailedBanner(){
+    if (!failedPushes.length) return '';
+    var rows = failedPushes.slice(0, 5).map(function(f){
+      var fields = Object.keys(((f.payload || {}).crm_fields) || {}).join(', ');
+      return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid #F3E3DC">'
+        + '<span style="flex:1;min-width:0;font-size:12.5px;color:#3D4149">'
+          + '<b style="font-weight:600">'+esc(f.object_type)+'</b> · '+esc(fields || 'change')
+          + '<span style="color:#9A9EA6"> — '+esc(String(f.last_error || 'no reason recorded').slice(0,90))+'</span>'
+        + '</span>'
+        + '<span style="font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#A6A9AF;white-space:nowrap">'+esc(f.object_id)+'</span>'
+        + '<span data-retry="'+esc(f.id)+'" style="font-size:11.5px;font-weight:600;color:#fff;background:#B4231F;border-radius:7px;padding:5px 11px;cursor:pointer;white-space:nowrap">Retry</span>'
+      + '</div>';
+    }).join('');
+    return '<div style="background:#FBE9E7;border:1px solid #F0D4CE;border-radius:12px;padding:12px 15px;margin-bottom:16px">'
+      + '<div style="font-size:12.5px;font-weight:700;color:#B4231F">'
+        + failedPushes.length + ' correction' + (failedPushes.length===1?'':'s') + " didn't reach NowCerts"
+      + '</div>'
+      + '<div style="font-size:11.5px;color:#9A6B65;margin-top:2px">Saved in the CRM. NowCerts still shows the old value.</div>'
+      + rows
+    + '</div>';
+  }
+
+  function retryPush(queueId){
+    fetch('/api/ams/failed-pushes/'+encodeURIComponent(queueId)+'/retry', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ retried_by: actingAs() })
+    }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        if (!res.ok || !res.j.pushed) {
+          alert('Still not synced:\n' + ((res.j && (res.j.detail || res.j.error)) || 'unknown'));
+        }
+        loadFailedPushes();
+      });
+  }
+
   // A CRM sub-view: header, then a table of whatever the endpoint returned.
   // Never renders a placeholder row — an empty book says it is empty.
   function crmTable(key){
@@ -1428,11 +1535,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     } else if(!d.rows.length){
       body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">No '+cfg.label.toLowerCase()+' in the book.</div>';
     } else {
-      total = d.rows.length;
-      // Clamp the page: sorting or a reload can leave you past the end.
+      var visible = liveFilter(key, d.rows);
+      total = visible.length;
+      // Clamp the page: sorting, filtering or a reload can leave you past the end.
       var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
       if (st.page > pages - 1) st.page = pages - 1;
-      shown = sortRows(d.rows, cfg.cols, st).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
+      shown = sortRows(visible, cfg.cols, st).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
       body = shown.map(function(r){
         // Clients open a 360; cases, tasks and pipeline rows open the card that
         // edits them. The rest are still read-only lists.
@@ -1451,7 +1559,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '</div>';
       }).join('');
     }
-    var count = d.rows ? d.rows.length : null;
+    var count = d.rows ? total : null;
     var card = '';
     if (workOpen && (key === 'cases' || key === 'tasks')
         && workOpen.kind === (key === 'tasks' ? 'task' : 'case')) card = renderWorkCard();
@@ -1495,6 +1603,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '</div>'
         + addBtn
       + '</div>'
+      + renderFailedBanner()
+      + liveChips(key, d.rows || [])
       + card
       + listBlock;
   }
@@ -2046,12 +2156,19 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
     // Either way you go back to page 1 — staying on page 7 of a list you just
     // re-ordered shows you rows you did not ask for.
+    if(el.hasAttribute('data-live')){
+      var lv = el.getAttribute('data-live').split(':'), lst = listFor(lv[0]);
+      lst.live = lv[1]; lst.page = 0;   // a new filter is a new list; start at its top
+      render();
+      return;
+    }
+    if(el.hasAttribute('data-retry')){ retryPush(el.getAttribute('data-retry')); return; }
     if(el.hasAttribute('data-sort')){
       var sp = el.getAttribute('data-sort').split(':'), sk = sp[0], si = parseInt(sp[1],10);
       var sst = listFor(sk);
@@ -2397,6 +2514,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     pull('/api/cases').then(function(d){ if(applyCases(d)){ homeFromLive(); render(); } });
     // The kanban's columns come from the backend, so the board and the stage
     // move it performs cannot disagree about what a stage is.
+    loadFailedPushes();
     pull('/api/pipeline/stages').then(function(d){
       if (d && !d._error && Array.isArray(d.new_business)) { pipelineStages = d; render(); }
     });
