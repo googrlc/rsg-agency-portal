@@ -140,6 +140,9 @@ const WRITE_ROUTES = [
   { m: 'POST',   re: /^\/api\/opportunities$/ },
   { m: 'PATCH',  re: /^\/api\/opportunities\/([0-9a-f-]{36})$/ },
   { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/stage$/ },
+  // What happened on a deal. A note is the one thing here a person writes by
+  // hand; stage moves and AMS filings are logged by the backend itself.
+  { m: 'POST',   re: /^\/api\/opportunities\/([0-9a-f-]{36})\/notes$/ },
 
   // Correct a client or policy field. An override: it outranks the synced value
   // until NowCerts reports the same thing. The NowCerts identifiers are kept out
@@ -189,6 +192,8 @@ const READ_PATTERNS = [
   // the backend cannot disagree about what a stage is.
   { re: /^\/api\/pipeline\/stages$/ },
   { re: /^\/api\/case-templates$/ },
+  // A deal's timeline.
+  { re: /^\/api\/opportunities\/([0-9a-f-]{36})\/events$/ },
   // One lead, with everything said to them so far.
   { re: /^\/api\/leads\/([0-9a-f-]{36})$/ },
   // Client 360 — the record plus their policies, cases, tasks and opportunities.

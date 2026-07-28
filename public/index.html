@@ -246,6 +246,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var leadNoteDraft = '';     // the note being typed, kept across re-renders
   var dealOpen = null;        // opportunity id being edited, or 'new'
   var dealDraft = {};         // the record a 'new' deal is built into
+  var dealEvents = null;      // the open deal's timeline (null = not loaded yet)
+  var dealNoteDraft = '';     // the note being typed, kept across re-renders
   var policyDraft = {};       // ditto for a new policy
   var pipelineStages = null;  // {new_business:[…], renewal:[…]} — from the backend
   var pipelineBoard = true;   // Pipeline shows the kanban; false = the table
@@ -918,6 +920,15 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
             ? editField('deal', rec, 'opportunity_type', 'Pipeline', {options:pipelineStages.types}) : '')
         + (stages ? editField('deal', rec, 'stage', 'Stage', {options:stages}) : '')
       + '</div>'
+      // The deal's history. Partly written here, partly by the backend: stage
+      // moves and AMS filings log themselves, so this is the one place that can
+      // answer "who moved this to Lost, and when, and why".
+      + (isNew ? ''
+          : dealEvents === null
+            ? '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #EFEFEB;font-size:12px;color:#96999F">Loading history…</div>'
+            : timelineBlock('History', dealEvents.map(function(e){
+                return { text:e.summary, who:e.actor_email, when:e.created_at, kind:e.event_type };
+              }), 'data-dealnote="1"', dealNoteDraft, 'deal:note'))
     + '</div>';
   }
 
@@ -1134,6 +1145,72 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }).catch(saveUnreachable);
   }
 
+  // One timeline renderer for both working surfaces. A lead's history and a deal's
+  // history answer the same question and should not look like two different
+  // features — the only difference is that a deal's is partly written by the
+  // backend (stage moves, AMS filings) rather than entirely by a person.
+  //
+  // `entries` are normalised to {text, who, when, kind} by the caller.
+  var EVENT_LOOK = {
+    stage: ['#2563EB', '#E9EFFC'],
+    ams:   ['#B9822A', '#F7EEDB'],
+    created: ['#6B7078', '#EFEFEC'],
+    note:  null,                      // a note needs no chip; it is the default
+  };
+  function timelineBlock(title, entries, noteAttr, draft, noteAction){
+    var list = entries.length
+      ? entries.map(function(e){
+          var look = EVENT_LOOK[e.kind];
+          return '<div style="padding:9px 0;border-top:1px solid #F2F2EE">'
+            // The trailing space is deliberate: the chip and the text are adjacent
+            // inline spans, and a margin separates them visually but not in the
+            // text layer — copied or read aloud it came out as "stageMoved from".
+            + (look ? '<span style="font-size:10px;font-weight:700;border-radius:999px;padding:2px 7px;margin-right:7px;'
+                      + 'color:'+look[0]+';background:'+look[1]+'">'+esc(e.kind)+'</span> ' : '')
+            + '<span style="font-size:12.5px;color:#25282E;line-height:1.45;white-space:pre-wrap">'+esc(e.text)+'</span>'
+            + '<div style="font-size:11px;color:#9A9EA6;margin-top:3px">'
+              + esc(e.who ? nameFromEmail(e.who) : 'Hermes') + ' · ' + dueHtml(e.when)
+            + '</div>'
+          + '</div>';
+        }).join('')
+      : '<div style="padding:10px 0;font-size:12px;color:#B4B7BD">Nothing recorded yet.</div>';
+
+    return '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #EFEFEB">'
+      + '<div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700;margin-bottom:6px">'
+        + title + ' <span style="color:#B7BAC0">'+entries.length+'</span></div>'
+      + '<div style="display:flex;gap:8px;align-items:flex-start">'
+        + '<textarea '+noteAttr+' rows="2" placeholder="What happened?" style="flex:1;border:1px solid #E6E6E2;border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;color:#25282E;resize:vertical;line-height:1.45">'+esc(draft)+'</textarea>'
+        + '<span data-edit="'+noteAction+'" style="font-size:12px;font-weight:600;border-radius:8px;padding:8px 13px;cursor:pointer;'
+          + (draft.trim() ? 'color:#fff;background:#2F6B4F' : 'color:#B7BAC0;background:#F1F1EE')+'">Add note</span>'
+      + '</div>'
+      + list
+    + '</div>';
+  }
+
+  function loadDealEvents(id){
+    dealEvents = null;
+    pull('/api/opportunities/'+encodeURIComponent(id)+'/events').then(function(d){
+      dealEvents = (d && !d._error && Array.isArray(d.events)) ? d.events : [];
+      render();
+    });
+  }
+
+  function addDealNote(){
+    var rec = dealRecord();
+    var text = String(dealNoteDraft || '').trim();
+    if (!rec || !rec.id || !text) return;
+    fetch('/api/opportunities/'+encodeURIComponent(rec.id)+'/notes', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ body:text, author_email:actingAs() })
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That note was refused:\n' + JSON.stringify(err)); return; }
+      dealNoteDraft = '';
+      loadDealEvents(rec.id);
+    }).catch(saveUnreachable);
+  }
+
   function renderLeadCard(){
     if (!leadOpen) return '';
     var isNew = leadOpen === 'new';
@@ -1157,29 +1234,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
           + '<span data-edit="lead:delete" style="font-size:12px;color:#B4231F;cursor:pointer">Delete</span>');
 
     var notes = (leadData && leadData.notes) || [];
-    var noteList = notes.length
-      ? notes.map(function(n){
-          return '<div style="padding:9px 0;border-top:1px solid #F2F2EE">'
-            + '<div style="font-size:12.5px;color:#25282E;line-height:1.45;white-space:pre-wrap">'+esc(n.body)+'</div>'
-            + '<div style="font-size:11px;color:#9A9EA6;margin-top:3px">'
-              + esc(n.author_email ? nameFromEmail(n.author_email) : 'someone') + ' · ' + dueHtml(n.created_at)
-            + '</div>'
-          + '</div>';
-        }).join('')
-      : '<div style="padding:10px 0;font-size:12px;color:#B4B7BD">Nothing written down yet.</div>';
-
-    var notesBlock = isNew
-      ? ''
-      : '<div style="margin-top:16px;padding-top:14px;border-top:1px solid #EFEFEB">'
-        + '<div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700;margin-bottom:6px">'
-          + 'Notes <span style="color:#B7BAC0">'+notes.length+'</span></div>'
-        + '<div style="display:flex;gap:8px;align-items:flex-start">'
-          + '<textarea data-leadnote="1" rows="2" placeholder="What was said?" style="flex:1;border:1px solid #E6E6E2;border-radius:9px;padding:8px 11px;font:inherit;font-size:13px;color:#25282E;resize:vertical;line-height:1.45">'+esc(leadNoteDraft)+'</textarea>'
-          + '<span data-edit="lead:note" style="font-size:12px;font-weight:600;border-radius:8px;padding:8px 13px;cursor:pointer;'
-            + (leadNoteDraft.trim() ? 'color:#fff;background:#2F6B4F' : 'color:#B7BAC0;background:#F1F1EE')+'">Add note</span>'
-        + '</div>'
-        + noteList
-      + '</div>';
+    var notesBlock = isNew ? '' : timelineBlock('Notes', notes.map(function(n){
+      return { text:n.body, who:n.author_email, when:n.created_at, kind:'note' };
+    }), 'data-leadnote="1"', leadNoteDraft, 'lead:note');
 
     var linked = (rec && rec.converted_opportunity_id)
       ? '<div style="grid-column:1/-1;font-size:11.5px;color:#2F6B4F;background:#EAF1EC;border-radius:8px;padding:8px 11px">'
@@ -1514,7 +1571,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   function closeDeal(){
     if (!dealOpen) return true;
     if (!unsavedOk(Object.keys(edits.deal).length)) return false;
-    dealOpen = null; edits.deal = {}; dealDraft = {}; render();
+    dealOpen = null; edits.deal = {}; dealDraft = {};
+    dealEvents = null; dealNoteDraft = '';
+    render();
     return true;
   }
 
@@ -1550,7 +1609,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       // AMS filing was queued or blocked.
       var last = stage ? rs[rs.length - 1] : null;
       return (last ? last.json().then(reportAmsOutcome) : Promise.resolve())
-        .then(function(){ loadCrmView('pipeline', true); });
+        .then(function(){
+          loadCrmView('pipeline', true);
+          if (stage && dealOpen) loadDealEvents(rec.id);   // the move logged itself
+        });
     }).catch(saveUnreachable);
   }
 
@@ -1590,6 +1652,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         if (!res.ok) { alert('That move was refused:\n' + JSON.stringify((res.j && res.j.detail) || res.j)); return; }
         reportAmsOutcome(res.j);
         loadCrmView('pipeline', true);
+        // The move just logged itself. If the card that shows the history is
+        // open, it has to say so without being reopened.
+        if (dealOpen && String(dealOpen) === String(id)) loadDealEvents(id);
       }).catch(function(){
         alert('Couldn\'t reach the server, so the deal did not move.\n\n'
             + 'Check your connection and drag it again.');
@@ -2646,13 +2711,16 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(!t || !t.getAttribute) return;
     // The note box is not a record field — it is held on its own so a re-render
     // (which the Add-note button's enabled state triggers) does not lose it.
-    if(t.getAttribute('data-leadnote')){
-      var had = leadNoteDraft.trim().length > 0;
-      leadNoteDraft = t.value;
-      if((leadNoteDraft.trim().length > 0) !== had){
+    var noteBox = t.getAttribute('data-leadnote') ? 'lead'
+                : t.getAttribute('data-dealnote') ? 'deal' : null;
+    if(noteBox){
+      var had = (noteBox === 'lead' ? leadNoteDraft : dealNoteDraft).trim().length > 0;
+      if(noteBox === 'lead') leadNoteDraft = t.value; else dealNoteDraft = t.value;
+      var now = (noteBox === 'lead' ? leadNoteDraft : dealNoteDraft).trim().length > 0;
+      if(now !== had){
         var at = t.selectionStart;
         render();
-        var again = document.querySelector('[data-leadnote]');
+        var again = document.querySelector('[data-'+noteBox+'note]');
         if(again){ again.focus(); try{ again.setSelectionRange(at, at); }catch(err){} }
       }
       return;
@@ -2776,7 +2844,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if (dv === 'new') { if (closeDeal()) { dealOpen = 'new'; dealDraft = {}; render(); } return; }
       if (dealOpen && String(dealOpen) === dv) return;
       if (!closeDeal()) return;
-      dealOpen = dv; render();
+      dealOpen = dv; dealNoteDraft = '';
+      loadDealEvents(dv);   // renders immediately, fills in when it lands
+      render();
       return;
     }
     // A lead on the Leads list, or "new".
@@ -2833,7 +2903,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         else if(ek === 'lead') createLead();
         return;
       }
-      if(act === 'note'){ addLeadNote(); return; }
+      if(act === 'note'){ (ek === 'deal' ? addDealNote : addLeadNote)(); return; }
       if(act === 'convert'){ convertLead(); return; }
       if(act === 'finish'){ finishWork(); return; }
       if(act === 'delete'){ (ek === 'lead' ? deleteLead : deleteWork)(); return; }
