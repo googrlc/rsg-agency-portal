@@ -228,7 +228,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // One in-progress buffer per editable surface: field -> typed value, before it
   // is saved. Several can be open at once (a client, one of their policies, and
   // a task on the same screen), so they are kept apart rather than pooled.
-  var edits = { client:{}, policy:{}, work:{}, renewal:{} };
+  var edits = { client:{}, policy:{}, work:{}, renewal:{}, deal:{} };
+  var dealOpen = null;        // opportunity id being edited, or 'new'
+  var dealDraft = {};         // the record a 'new' deal is built into
+  var policyDraft = {};       // ditto for a new policy
+  var pipelineStages = null;  // {new_business:[…], renewal:[…]} — from the backend
+  var pipelineBoard = true;   // Pipeline shows the kanban; false = the table
 
   // Renewals
   var renewalKpis = [
@@ -573,21 +578,29 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   // Save / Discard / close, rendered the same way on every card.
-  function cardActions(kind, extra){
+  //
+  // Save is always on the card, greyed until there is something to save. It used
+  // to appear only once a field went dirty, which meant the answer to "where do
+  // I save this?" was "type something and find out".
+  function cardActions(kind, extra, recId){
     var dirty = Object.keys(edits[kind]).length;
+    var save = dirty
+      ? 'color:#fff;background:#2F6B4F;cursor:pointer'
+      : 'color:#B7BAC0;background:#F1F1EE;cursor:default';
     return '<div style="display:flex;align-items:center;gap:10px">'
+      + (recId ? amsBadge(recId) : '')
       + (extra || '')
-      + (dirty
-          ? '<span data-edit="'+kind+':discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>'
-            + '<span data-edit="'+kind+':save" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Save '+dirty+' change'+(dirty===1?'':'s')+'</span>'
-          : '<span style="font-size:11.5px;color:#9A9EA6">Edit a field to change it</span>')
+      + (dirty ? '<span data-edit="'+kind+':discard" style="font-size:12px;color:#6B7078;cursor:pointer">Discard</span>' : '')
+      + '<span'+(dirty?' data-edit="'+kind+':save"':'')+' style="font-size:12px;font-weight:600;border-radius:8px;padding:7px 13px;'+save+'">'
+        + (dirty ? 'Save '+dirty+' change'+(dirty===1?'':'s') : 'Save') + '</span>'
       + '<span data-edit="'+kind+':close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
     + '</div>';
   }
 
   // `rowAttr` optionally makes rows clickable — it returns the attributes for a
   // row (e.g. which policy to open). Lists without one stay read-only.
-  function miniList(title, rows, cols, empty, rowAttr){
+  // `action` is a button in the list's header, for adding to it.
+  function miniList(title, rows, cols, empty, rowAttr, action){
     var head = cols.map(function(c){ return '<span>'+c[1]+'</span>'; }).join('');
     var grid = 'display:grid;grid-template-columns:repeat('+cols.length+',minmax(0,1fr));gap:10px;';
     var body = rows.length
@@ -599,8 +612,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         }).join('')
       : '<div style="padding:16px 14px;font-size:12.5px;color:#96999F">'+empty+'</div>';
     return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:12px;overflow:hidden">'
-      + '<div style="padding:11px 14px;font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+title
-        + ' <span style="font-size:11.5px;color:#9A9EA6">'+rows.length+'</span></div>'
+      + '<div style="padding:11px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px">'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+title
+          + ' <span style="font-size:11.5px;color:#9A9EA6">'+rows.length+'</span></span>'
+        + (action || '')
+      + '</div>'
       + (rows.length ? '<div style="'+grid+'padding:8px 14px;background:#FAFAF7;border-top:1px solid #EFEFEB;font-size:9.5px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+head+'</div>' : '')
       + body
     + '</div>';
@@ -637,10 +653,23 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+  // A policy can be opened from the client 360 or from the Policies list, and
+  // "new" is a policy that does not exist yet — same card, empty record.
+  function policyRecord(){
+    if (policyOpen === 'new') return policyDraft;
+    var fromClient = clientData ? clientData.policies : null;
+    var fromTable = (crmData.policies || {}).rows;
+    var pools = (state.crmView === 'client') ? [fromClient, fromTable] : [fromTable, fromClient];
+    for (var p=0;p<pools.length;p++){
+      var rows = pools[p] || [];
+      for (var i=0;i<rows.length;i++) if (rows[i].policy_guid === policyOpen) return rows[i];
+    }
+    return null;
+  }
+
   function renderPolicyCard(){
-    var list = (clientData && clientData.policies) || [];
-    var rec = null;
-    for (var i=0;i<list.length;i++) if (list[i].policy_guid === policyOpen) rec = list[i];
+    if (policyOpen === 'new') return renderNewPolicyCard();
+    var rec = policyRecord();
     if (!rec) return '';
     var ovr = rec._overridden || {};
 
@@ -648,7 +677,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
         + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Policy '
           + esc(rec.policy_number || '—')+'</span>'
-        + cardActions('policy')
+        + cardActions('policy', '', rec.policy_guid)
       + '</div>'
       + '<div style="font-size:11px;color:#9A9EA6;margin-bottom:13px">Identifiers come from NowCerts and are read-only.</div>'
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:11px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px;margin-bottom:14px">'
@@ -657,6 +686,154 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
         + POLICY_FIELDS.map(function(f){ return editField('policy', rec, f[0], f[1], {overridden:ovr}); }).join('')
       + '</div>'
+    + '</div>';
+  }
+
+  // ---- Adding a policy ------------------------------------------------------
+  // A new policy is created in NowCerts, not in the mirror: the AMS owns what a
+  // client has bound, and a row invented in canonical_policies would be
+  // tombstoned by the next import. It therefore needs a client that the AMS can
+  // confirm — pre-filled when you started from that client's page.
+  var NEW_POLICY_FIELDS = [
+    ['policy_number','Policy number', {wide:true}], ['carrier','Carrier'],
+    ['lines_of_business','Line of business'],
+    ['effective_date','Effective date', {placeholder:'YYYY-MM-DD'}],
+    ['expiration_date','Expiration date', {placeholder:'YYYY-MM-DD'}],
+    ['premium_amount','Premium'],
+  ];
+
+  function renderNewPolicyCard(){
+    var known = policyDraft.insured_id;
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">New policy</span>'
+        + '<div style="display:flex;align-items:center;gap:10px">'
+          + '<span data-edit="policy:create" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Create in NowCerts</span>'
+          + '<span data-edit="policy:close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
+        + '</div>'
+      + '</div>'
+      + '<div style="font-size:11px;color:#9A9EA6;margin-bottom:13px">This writes to NowCerts. The CRM will show it after the next sync.</div>'
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
+        + (known
+            ? '<div style="grid-column:1/-1">'+readonlyId('Client',
+                (policyDraft.insured_name || '') + ' · ' + policyDraft.insured_id, true)+'</div>'
+            : editField('policy', policyDraft, 'insured_id', 'Client (NowCerts insured ID)',
+                        {wide:true, placeholder:'open a client and add from there, or paste the insured GUID'}))
+        + NEW_POLICY_FIELDS.map(function(f){ return editField('policy', policyDraft, f[0], f[1], f[2]); }).join('')
+      + '</div>'
+    + '</div>';
+  }
+
+  // ---- Pipeline -------------------------------------------------------------
+  // Opportunities are the CRM's own records — an edit is a real write, not an
+  // override. The board's columns come from the backend so they cannot drift
+  // from what a stage move will be allowed to set.
+  var DEAL_FIELDS = [
+    ['insured_name','Client', {wide:true}], ['line_of_business','Line of business'],
+    ['carrier','Carrier'], ['premium_estimate','Premium estimate'],
+    ['assigned_to_email','Owner'], ['next_action','Next action', {wide:true}],
+    ['description','Notes', {wide:true, area:true}],
+  ];
+
+  function dealRecord(){
+    if (dealOpen === 'new') return dealDraft;
+    var rows = (crmData.pipeline || {}).rows || (clientData && clientData.opportunities) || [];
+    for (var i=0;i<rows.length;i++) if (String(rows[i].id) === String(dealOpen)) return rows[i];
+    return null;
+  }
+
+  function stageOptions(rec){
+    var s = pipelineStages;
+    if (!s) return null;
+    // A renewal deal is worked on the renewal ladder; everything else on the
+    // acquisition one. Offering all of them would let a renewal be dropped into
+    // "Sent For Quoting", which means nothing there.
+    var isRenewal = String(rec.opportunity_type || '').toLowerCase().indexOf('renew') >= 0;
+    return isRenewal ? s.renewal : s.new_business;
+  }
+
+  function renderDealCard(){
+    if (!dealOpen) return '';
+    var rec = dealRecord();
+    if (!rec) return '';
+    var isNew = dealOpen === 'new';
+    var stages = stageOptions(rec);
+
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:4px">'
+        + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">'
+          + (isNew ? 'New deal' : esc(rec.insured_name || rec.line_of_business || 'Deal')) + '</span>'
+        + (isNew
+            ? '<div style="display:flex;align-items:center;gap:10px">'
+              + '<span data-edit="deal:create" style="font-size:12px;font-weight:600;color:#fff;background:#2F6B4F;border-radius:8px;padding:7px 13px;cursor:pointer">Create deal</span>'
+              + '<span data-edit="deal:close" title="Close (Esc)" style="font-size:16px;line-height:1;color:#9A9EA6;cursor:pointer;padding:0 2px">×</span>'
+            + '</div>'
+            : cardActions('deal'))
+      + '</div>'
+      + (isNew ? '' : '<div style="display:grid;grid-template-columns:1fr 1fr;gap:11px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px;margin:9px 0 14px">'
+          + readonlyId('Deal ID', rec.id, true)
+          + readonlyId('Stage', rec.stage) + readonlyId('Status', rec.status)
+        + '</div>')
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
+        + (isNew ? editField('deal', rec, 'insured_id', 'Client (NowCerts insured ID)', {wide:true}) : '')
+        + DEAL_FIELDS.map(function(f){ return editField('deal', rec, f[0], f[1], f[2]); }).join('')
+        + (stages ? editField('deal', rec, 'stage', 'Stage', {options:stages}) : '')
+      + '</div>'
+    + '</div>';
+  }
+
+  // The board. One column per stage, cards in it, click to open — the same card
+  // the list view opens, so there is one editor rather than two.
+  function renderKanban(){
+    var d = crmData.pipeline || {};
+    if (d.loading || (!d.rows && !d.error)) return '<div style="padding:26px 2px;font-size:12.5px;color:#96999F">Loading pipeline…</div>';
+    if (d.error) return '<div style="padding:26px 2px;font-size:12.5px;color:#B4231F">Couldn\'t load the pipeline — '+esc(d.error)+'</div>';
+    var rows = d.rows || [];
+    var stages = (pipelineStages && pipelineStages.new_business) || [];
+    if (!stages.length) return '<div style="padding:26px 2px;font-size:12.5px;color:#96999F">Loading stages…</div>';
+
+    // Anything whose stage is not on the board still has to appear somewhere —
+    // a deal you cannot see is a deal nobody works.
+    var known = {}; stages.forEach(function(s){ known[s] = []; });
+    var stray = [];
+    rows.forEach(function(r){ (known[r.stage] ? known[r.stage] : stray).push(r); });
+
+    var cols = stages.map(function(s){
+      var items = known[s], sum = items.reduce(function(a,r){ return a + (parseFloat(r.premium_estimate)||0); }, 0);
+      return '<div data-stagecol="'+esc(s)+'" style="flex:0 0 262px;display:flex;flex-direction:column;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:12px;max-height:100%">'
+        + '<div style="padding:11px 13px;border-bottom:1px solid #EFEFEB">'
+          + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">'
+            + '<span style="font-size:12px;font-weight:700;color:#3D4149">'+esc(s)+'</span>'
+            + '<span style="font-size:11px;font-weight:700;color:#6B7078;background:#EFEFEC;border-radius:999px;padding:2px 8px">'+items.length+'</span>'
+          + '</div>'
+          + '<div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+(sum ? money(sum) : '—')+'</div>'
+        + '</div>'
+        + '<div style="flex:1;overflow:auto;padding:9px;display:flex;flex-direction:column;gap:8px">'
+          + (items.length ? items.map(dealTile).join('')
+              : '<div style="font-size:11.5px;color:#B4B7BD;padding:8px 4px">Nothing here.</div>')
+        + '</div>'
+      + '</div>';
+    }).join('');
+
+    return '<div style="display:flex;gap:12px;align-items:stretch;overflow-x:auto;padding-bottom:10px;min-height:0">'
+      + cols
+      + (stray.length
+          ? '<div style="flex:0 0 262px;display:flex;flex-direction:column;background:#FBF4E9;border:1px solid #F0E2CB;border-radius:12px">'
+            + '<div style="padding:11px 13px;border-bottom:1px solid #F0E2CB"><span style="font-size:12px;font-weight:700;color:#B9822A">Off the board</span>'
+            + '<div style="font-size:11px;color:#B9822A;margin-top:3px">'+stray.length+' on a stage this pipeline does not use</div></div>'
+            + '<div style="flex:1;overflow:auto;padding:9px;display:flex;flex-direction:column;gap:8px">'+stray.map(dealTile).join('')+'</div>'
+          + '</div>'
+          : '')
+    + '</div>';
+  }
+
+  function dealTile(r){
+    var prem = r.premium_estimate != null ? money(r.premium_estimate) : '';
+    return '<div class="tile" data-deal="'+esc(r.id)+'" style="background:#fff;border:1px solid #E7E7E4;border-radius:10px;padding:10px 11px;cursor:pointer">'
+      + '<div style="font-size:12.5px;color:#1B1D22;font-weight:500;line-height:1.35">'+esc(r.insured_name || '—')+'</div>'
+      + '<div style="font-size:11.5px;color:#787C84;margin-top:3px">'+esc(r.line_of_business || '—')+'</div>'
+      + (prem ? '<div style="font-size:12px;color:#2F6B4F;font-weight:600;margin-top:5px">'+prem+'</div>' : '')
+      + (r.carrier ? '<div style="font-size:11px;color:#9A9EA6;margin-top:2px">'+esc(r.carrier)+'</div>' : '')
     + '</div>';
   }
 
@@ -756,7 +933,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">'
         + '<div data-client="close" style="font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Clients</div>'
         + '<div style="width:1px;height:16px;background:#E2E1DC"></div>'
-        + '<span style="font-size:11.5px;color:#96999F">Corrections are held in the CRM — they do not write to NowCerts</span>'
+        + '<span style="font-size:11.5px;color:#96999F">Saving a correction also writes it to NowCerts — it will ask first</span>'
       + '</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:27px;color:#1B1D22;margin:6px 0 2px;font-weight:500">'+esc(rec.insured_name || '—')+'</h1>'
       + '<div style="font-size:12.5px;color:#787C84;margin-bottom:3px">'+esc(rec.client_type || '—')
@@ -769,7 +946,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
           + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">'
             + '<span style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22">Details</span>'
-            + cardActions('client')
+            + cardActions('client', '', rec.nowcerts_insured_guid)
           + '</div>'
           + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
             + CLIENT_FIELDS.map(function(f){ return editField('client', rec, f[0], f[1], {overridden:ovr}); }).join('')
@@ -779,7 +956,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
           + renderPolicyCard()
           + renderWorkCard()
           + miniList('Policies', d.policies || [], [['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status','chip'],['expiration_date','Expires','date'],['annualized_premium','Premium','money']], 'No policies on this client.',
-              function(p){ return p.policy_guid ? 'data-policy="'+esc(p.policy_guid)+'"' : ''; })
+              function(p){ return p.policy_guid ? 'data-policy="'+esc(p.policy_guid)+'"' : ''; },
+              // Adding from here is the sane path: the insured is already known,
+              // so the new policy cannot be attached to the wrong client.
+              '<span data-policyrow="new" style="font-size:11.5px;font-weight:600;color:#2F6B4F;cursor:pointer">Add policy +</span>')
           + miniList('Cases', d.cases || [], [['case_number','Case #'],['title','Subject'],['status','Status','chip'],['priority','Priority','chip']], 'No cases.',
               function(k){ return k.id ? 'data-work="case:'+esc(k.id)+'"' : ''; })
           + miniList('Tasks', d.tasks || [], [['title','Task'],['status','Status','chip'],['due_at','Due','date']], 'No tasks.',
@@ -809,8 +989,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   }
 
   function closePolicy(force){
-    if (!force && !unsavedOk(Object.keys(edits.policy).length)) return false;
-    policyOpen = null; edits.policy = {}; render();
+    // A half-filled new policy counts as unsaved work too — it is the only copy.
+    var pending = Object.keys(edits.policy).length
+      + (policyOpen === 'new' ? Object.keys(policyDraft).length : 0);
+    if (!force && !unsavedOk(pending)) return false;
+    policyOpen = null; edits.policy = {}; policyDraft = {}; render();
     return true;
   }
 
@@ -822,43 +1005,199 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return true;
   }
 
-  function savePolicyEdits(){
-    var guid = policyOpen, fields = Object.keys(edits.policy);
-    if (!guid || !fields.length) return;
-    var who = (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
-                                          : 'lamar@risksolutionsgroup.net';
-    Promise.all(fields.map(function(f){
-      return fetch('/api/policies/'+encodeURIComponent(guid)+'/override', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ field_name:f, value:edits.policy[f], approved_by:who,
-                               reason:'corrected in the CRM' })
-      }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
-    })).then(function(errs){
-      var bad = errs.filter(Boolean);
-      edits.policy = {};
-      if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
-      openClient(state.client, true);   // re-read; keep the policy open
-    });
-  }
-
   function saveClientEdits(){
     var guid = state.client, fields = Object.keys(edits.client);
     if (!guid || !fields.length) return;
-    var who = (state.user === 'gretchen') ? 'gretchen@risksolutionsgroup.net'
-                                          : 'lamar@risksolutionsgroup.net';
+    if (!confirmSave('client', guid, edits.client)) return;
+    var who = actingAs(), buf = edits.client;
     // One override per field — each is its own named, reversible decision.
     Promise.all(fields.map(function(f){
       return fetch('/api/clients/'+encodeURIComponent(guid)+'/override', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ field_name:f, value:edits.client[f], approved_by:who,
+        body: JSON.stringify({ field_name:f, value:buf[f], approved_by:who,
                                reason:'corrected in the CRM' })
       }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
     })).then(function(errs){
       var bad = errs.filter(Boolean);
-      edits.client = {};
       if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
+      return pushToAms('clients', guid, buf);
+    }).then(function(){
+      edits.client = {};
       openClient(guid, true);  // re-read so the saved values come back from the API
     });
+  }
+
+  // ---- Saving, and what it means -------------------------------------------
+  // The CRM correction and the AMS write are two different promises, so the
+  // confirmation says which one you are making. It also lists the change
+  // itself: "Save 3 changes" tells you how many, not which, and the moment
+  // something goes to the system of record that difference matters.
+  var AMS_PUSHABLE = {
+    client: ['insured_name','email','phone','address','city','state','zip'],
+    policy: ['carrier','lines_of_business','premium_amount','annualized_premium',
+             'effective_date','expiration_date'],
+  };
+  var amsStatus = null;   // last push outcome, shown on the card
+
+  function confirmSave(kind, id, buf){
+    var keys = Object.keys(buf);
+    var pushable = keys.filter(function(k){ return AMS_PUSHABLE[kind].indexOf(k) >= 0; });
+    var lines = keys.map(function(k){
+      var v = buf[k] === '' ? '(blank)' : buf[k];
+      return '  · ' + k.replace(/_/g,' ') + ' → ' + v
+        + (pushable.indexOf(k) < 0 ? '   [CRM only]' : '');
+    }).join('\n');
+    var msg = 'Save ' + keys.length + ' change' + (keys.length===1?'':'s') + ' to this ' + kind + '?\n\n'
+      + lines + '\n\n'
+      + (pushable.length
+          ? 'This also writes ' + pushable.length + ' of them to NowCerts, on record\n' + id
+            + '\n\nNowCerts is the system of record. This cannot be undone from here.'
+          : 'These are held in the CRM only — nothing goes to NowCerts.');
+    return confirm(msg);
+  }
+
+  // Push after the CRM save, never instead of it: the correction is true either
+  // way, and if the AMS is unreachable we want the record fixed here and a
+  // retryable queue row there — not a lost edit.
+  function pushToAms(collection, id, buf){
+    var kind = collection === 'clients' ? 'client' : 'policy';
+    var fields = {};
+    Object.keys(buf).forEach(function(k){
+      if (AMS_PUSHABLE[kind].indexOf(k) >= 0) fields[k] = buf[k];
+    });
+    if (!Object.keys(fields).length) { amsStatus = null; return Promise.resolve(); }
+    amsStatus = { state:'sending', id:id };
+    render();
+    return fetch('/api/'+collection+'/'+encodeURIComponent(id)+'/push-to-ams', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ fields:fields, approved_by:actingAs(), reason:'corrected in the CRM' })
+    }).then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
+      .then(function(res){
+        if (!res.ok) { amsStatus = { state:'error', id:id, detail:(res.j && res.j.detail) || 'refused' }; return; }
+        amsStatus = res.j.pushed
+          ? { state: res.j.verified ? 'synced' : 'unverified', id:id,
+              detail: (res.j.unverified_fields || []).join(', ') }
+          : { state:'error', id:id, detail:res.j.error };
+      })
+      .catch(function(e){ amsStatus = { state:'error', id:id, detail:String(e) }; });
+  }
+
+  // One line on the card saying where the change actually got to.
+  function amsBadge(id){
+    if (!amsStatus || amsStatus.id !== id) return '';
+    var s = amsStatus.state;
+    var look = { sending:['#B9822A','#F7EEDB','Writing to NowCerts…'],
+                 synced:['#2F6B4F','#EAF1EC','Synced to NowCerts ✓'],
+                 unverified:['#B9822A','#F7EEDB','Sent, not confirmed by NowCerts'],
+                 error:['#B4231F','#FBE9E7','Not synced to NowCerts'] }[s];
+    if (!look) return '';
+    return '<span title="'+esc(amsStatus.detail || '')+'" style="font-size:11px;font-weight:700;border-radius:999px;'
+      + 'padding:3px 9px;color:'+look[0]+';background:'+look[1]+'">'+look[2]+'</span>';
+  }
+
+  function savePolicyEditsThenPush(){
+    var guid = policyOpen, fields = Object.keys(edits.policy);
+    if (!guid || guid === 'new' || !fields.length) return;
+    if (!confirmSave('policy', guid, edits.policy)) return;
+    var who = actingAs(), buf = edits.policy;
+    Promise.all(fields.map(function(f){
+      return fetch('/api/policies/'+encodeURIComponent(guid)+'/override', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ field_name:f, value:buf[f], approved_by:who,
+                               reason:'corrected in the CRM' })
+      }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && e.detail) || 'failed'; }); });
+    })).then(function(errs){
+      var bad = errs.filter(Boolean);
+      if (bad.length) alert('Some corrections were refused:\n' + bad.join('\n'));
+      return pushToAms('policies', guid, buf);
+    }).then(function(){
+      edits.policy = {};
+      if (state.crmView === 'client' && state.client) openClient(state.client, true);
+      else { loadCrmView('policies', true); }
+    });
+  }
+
+  function createPolicy(){
+    var d = Object.assign({}, policyDraft, edits.policy);
+    if (!d.insured_id || !d.policy_number) {
+      alert('A policy needs a client (NowCerts insured ID) and a policy number.');
+      return;
+    }
+    if (!confirm('Create policy ' + d.policy_number + ' in NowCerts for\n' + d.insured_id
+                 + '?\n\nThis writes to the system of record.')) return;
+    var body = { insured_id:d.insured_id, policy_number:d.policy_number,
+                 carrier:d.carrier || null, lines_of_business:d.lines_of_business || null,
+                 effective_date:d.effective_date || null, expiration_date:d.expiration_date || null,
+                 premium_amount: d.premium_amount ? parseFloat(String(d.premium_amount).replace(/[^0-9.\-]/g,'')) : null,
+                 approved_by: actingAs(), reason:'added in the CRM' };
+    fetch('/api/policies', { method:'POST', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify(body) })
+      .then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
+      .then(function(res){
+        if (!res.ok) { alert('NowCerts did not create it:\n' + JSON.stringify(res.j.detail || res.j)); return; }
+        policyOpen = null; policyDraft = {}; edits.policy = {};
+        alert('Created in NowCerts. It appears in the CRM after the next sync.');
+        render();
+      });
+  }
+
+  // ---- Pipeline writes ------------------------------------------------------
+  function closeDeal(){
+    if (!dealOpen) return true;
+    if (!unsavedOk(Object.keys(edits.deal).length)) return false;
+    dealOpen = null; edits.deal = {}; dealDraft = {}; render();
+    return true;
+  }
+
+  function saveDealEdits(){
+    var rec = dealRecord(), fields = Object.keys(edits.deal);
+    if (!rec || !fields.length) return;
+    var stage = edits.deal.stage;
+    var body = {};
+    fields.forEach(function(f){ if (f !== 'stage') body[f] = edits.deal[f] === '' ? null : edits.deal[f]; });
+    if (body.premium_estimate != null) body.premium_estimate = parseFloat(String(body.premium_estimate).replace(/[^0-9.\-]/g,''));
+
+    var steps = [];
+    if (Object.keys(body).length) {
+      steps.push(fetch('/api/opportunities/'+encodeURIComponent(rec.id), {
+        method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+      }));
+    }
+    // A stage change has its own endpoint — it is a pipeline move, with the
+    // side effects (status, probability) that implies, not a field write.
+    if (stage) {
+      steps.push(fetch('/api/opportunities/'+encodeURIComponent(rec.id)+'/stage', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ stage:stage, moved_by:actingAs() })
+      }));
+    }
+    Promise.all(steps).then(function(rs){
+      var bad = rs.filter(function(r){ return !r.ok; });
+      if (bad.length) return bad[0].json().then(function(e){
+        alert('That change was refused:\n' + JSON.stringify((e && e.detail) || e));
+      });
+      edits.deal = {};
+      loadCrmView('pipeline', true);
+    });
+  }
+
+  function createDeal(){
+    var d = Object.assign({}, dealDraft, edits.deal);
+    if (!d.line_of_business) { alert('A deal needs a line of business.'); return; }
+    var body = { line_of_business:d.line_of_business, insured_id:d.insured_id || null,
+                 insured_name:d.insured_name || null, carrier:d.carrier || null,
+                 assigned_to_email:d.assigned_to_email || null,
+                 next_action:d.next_action || null, description:d.description || null,
+                 stage:d.stage || null, source:'manual', created_by:actingAs() };
+    if (d.premium_estimate) body.premium_estimate = parseFloat(String(d.premium_estimate).replace(/[^0-9.\-]/g,''));
+    fetch('/api/opportunities', { method:'POST', headers:{'Content-Type':'application/json'},
+                                  body: JSON.stringify(body) })
+      .then(function(r){ return r.json().then(function(j){ return { ok:r.ok, j:j }; }); })
+      .then(function(res){
+        if (!res.ok) { alert('That deal was refused:\n' + JSON.stringify(res.j.detail || res.j)); return; }
+        dealOpen = null; dealDraft = {}; edits.deal = {};
+        loadCrmView('pipeline', true);
+      });
   }
 
   function actingAs(){
@@ -1006,16 +1345,82 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     });
   }
 
+  // ---- Sorting and paging a list -------------------------------------------
+  // Both are per-view and held in one place, so every list gets the same
+  // behaviour and switching views does not inherit the last one's sort.
+  var listState = {};   // view key -> {sort, dir, page}
+  var PAGE_SIZE = 50;
+
+  function listFor(key){
+    if (!listState[key]) listState[key] = { sort:null, dir:1, page:0 };
+    return listState[key];
+  }
+
+  // Sort by what the column MEANS, not by how it reads: money and premiums
+  // compare as numbers, dates as time, everything else as text. Sorting a
+  // premium column as text puts $9,100 above $40,000.
+  function sortValue(row, col){
+    var v = row[col[0]], fmt = col[2];
+    if (v == null || v === '') return null;
+    if (fmt === 'money') { var n = parseFloat(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n) ? null : n; }
+    if (fmt === 'date')  { var t = new Date(v).getTime(); return isNaN(t) ? null : t; }
+    return String(v).toLowerCase();
+  }
+
+  function sortRows(rows, cols, st){
+    if (st.sort == null || !cols[st.sort]) return rows;
+    var col = cols[st.sort];
+    return rows.slice().sort(function(a,b){
+      var x = sortValue(a,col), y = sortValue(b,col);
+      // Empty cells sort last in both directions — a blank is not "smallest",
+      // it is missing, and burying the rows you can act on under the ones you
+      // cannot is the opposite of what sorting is for.
+      if (x == null && y == null) return 0;
+      if (x == null) return 1;
+      if (y == null) return -1;
+      return (x < y ? -1 : x > y ? 1 : 0) * st.dir;
+    });
+  }
+
+  function sortHeader(key, cols){
+    var st = listFor(key);
+    return cols.map(function(c, i){
+      var on = st.sort === i;
+      var arrow = on ? (st.dir === 1 ? ' ▲' : ' ▼') : '';
+      return '<span data-sort="'+key+':'+i+'" title="Sort by '+esc(c[1])+'" style="cursor:pointer;user-select:none;'
+        + (c[2]==='money'?'text-align:right;':'') + (on?'color:#1B1D22;':'')
+        + 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+c[1]+arrow+'</span>';
+    }).join('');
+  }
+
+  // Page control. Renders nothing for a single page — a pager under 12 rows is
+  // furniture, not navigation.
+  function pager(key, total){
+    var st = listFor(key), pages = Math.ceil(total / PAGE_SIZE);
+    if (pages <= 1) return '';
+    var from = st.page * PAGE_SIZE + 1, to = Math.min(total, (st.page + 1) * PAGE_SIZE);
+    var btn = 'font-size:12px;font-weight:600;border-radius:7px;padding:5px 11px;border:1px solid #E6E6E2;background:#fff;';
+    var dead = 'color:#C3C6CB;cursor:default';
+    var live = 'color:#3D4149;cursor:pointer';
+    return '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 18px;border-top:1px solid #F2F2EE;background:#FCFCFA">'
+      + '<span style="font-size:12px;color:#787C84">'+from.toLocaleString('en-US')+'–'+to.toLocaleString('en-US')
+        + ' of '+total.toLocaleString('en-US')+'</span>'
+      + '<div style="display:flex;align-items:center;gap:8px">'
+        + '<span'+(st.page>0?' data-page="'+key+':prev"':'')+' style="'+btn+(st.page>0?live:dead)+'">‹ Prev</span>'
+        + '<span style="font-size:12px;color:#787C84">Page '+(st.page+1)+' of '+pages+'</span>'
+        + '<span'+(st.page<pages-1?' data-page="'+key+':next"':'')+' style="'+btn+(st.page<pages-1?live:dead)+'">Next ›</span>'
+      + '</div>'
+    + '</div>';
+  }
+
   // A CRM sub-view: header, then a table of whatever the endpoint returned.
   // Never renders a placeholder row — an empty book says it is empty.
   function crmTable(key){
     var cfg = CRM_VIEWS[key], d = crmData[key] || {};
-    var head = cfg.cols.map(function(c){
-      return '<span'+(c[2]==='money'?' style="text-align:right"':'')+'>'+c[1]+'</span>';
-    }).join('');
+    var st = listFor(key);
     var grid = 'display:grid;grid-template-columns:repeat('+cfg.cols.length+',minmax(0,1fr));gap:12px;';
 
-    var body;
+    var body, shown = [], total = 0;
     if(d.loading || (!d.rows && !d.error)){
       body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">Loading '+cfg.label.toLowerCase()+'…</div>';
     } else if(d.error){
@@ -1023,14 +1428,23 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     } else if(!d.rows.length){
       body = '<div style="padding:26px 18px;font-size:12.5px;color:#96999F">No '+cfg.label.toLowerCase()+' in the book.</div>';
     } else {
-      body = d.rows.slice(0,200).map(function(r){
-        // Clients open a 360; cases and tasks open the card that edits them.
-        // The rest are still read-only lists.
+      total = d.rows.length;
+      // Clamp the page: sorting or a reload can leave you past the end.
+      var pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      if (st.page > pages - 1) st.page = pages - 1;
+      shown = sortRows(d.rows, cfg.cols, st).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
+      body = shown.map(function(r){
+        // Clients open a 360; cases, tasks and pipeline rows open the card that
+        // edits them. The rest are still read-only lists.
         var open = ' style="';
         if (key === 'clients' && r.nowcerts_insured_guid) {
           open = ' data-client="'+esc(r.nowcerts_insured_guid)+'" style="cursor:pointer;';
         } else if ((key === 'cases' || key === 'tasks') && r.id) {
           open = ' data-work="'+(key === 'tasks' ? 'task' : 'case')+':'+esc(r.id)+'" style="cursor:pointer;';
+        } else if (key === 'pipeline' && r.id) {
+          open = ' data-deal="'+esc(r.id)+'" style="cursor:pointer;';
+        } else if (key === 'policies' && r.policy_guid) {
+          open = ' data-policyrow="'+esc(r.policy_guid)+'" style="cursor:pointer;';
         }
         return '<div class="rowh"'+open+grid+'padding:12px 18px;border-bottom:1px solid #F2F2EE;align-items:center">'
           + cfg.cols.map(function(c){ return crmCell(r, c); }).join('')
@@ -1038,19 +1452,51 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       }).join('');
     }
     var count = d.rows ? d.rows.length : null;
-    var card = (workOpen && (key === 'cases' || key === 'tasks')
-                && workOpen.kind === (key === 'tasks' ? 'task' : 'case'))
-      ? '<div style="margin-bottom:16px">' + renderWorkCard() + '</div>' : '';
-    return '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live from Hermes</div>'
-      + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">'+cfg.label+'</h1>'
-      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 18px">'
-        + (count!=null ? count.toLocaleString('en-US')+' record'+(count===1?'':'s')+(count>200?' · showing first 200':'') : '&nbsp;')
-      + '</p>'
-      + card
-      + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="'+grid+'padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+head+'</div>'
-        + body
+    var card = '';
+    if (workOpen && (key === 'cases' || key === 'tasks')
+        && workOpen.kind === (key === 'tasks' ? 'task' : 'case')) card = renderWorkCard();
+    else if (key === 'pipeline') card = renderDealCard();
+    else if (key === 'policies' && policyOpen) card = renderPolicyCard();
+    if (card) card = '<div style="margin-bottom:16px">' + card + '</div>';
+
+    // Anything you can add from a list gets its button next to the count, where
+    // you are already looking after finding it is not there.
+    var addBtn = '';
+    if (key === 'pipeline') {
+      // The board is the pipeline's natural shape; the table is still there for
+      // sorting and paging, which a board cannot do.
+      var tab = 'font-size:12px;font-weight:600;border-radius:8px;padding:6px 12px;cursor:pointer;';
+      addBtn = '<div style="display:flex;align-items:center;gap:8px">'
+        + '<span data-board="board" style="'+tab+(pipelineBoard?'color:#fff;background:#3D4149':'color:#3D4149;background:#fff;border:1px solid #E6E6E2')+'">Board</span>'
+        + '<span data-board="table" style="'+tab+(pipelineBoard?'color:#3D4149;background:#fff;border:1px solid #E6E6E2':'color:#fff;background:#3D4149')+'">Table</span>'
+        + '<span data-deal="new" style="'+tab+'color:#fff;background:#16233F">Add deal +</span>'
       + '</div>';
+    } else if (key === 'policies') {
+      addBtn = '<span data-policyrow="new" style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:8px;padding:7px 13px;cursor:pointer">Add policy +</span>';
+    }
+
+    var listBlock = (key === 'pipeline' && pipelineBoard)
+      ? renderKanban()
+      : '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
+          + '<div style="'+grid+'padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'
+            + sortHeader(key, cfg.cols)
+          + '</div>'
+          + body
+          + pager(key, total)
+        + '</div>';
+
+    return '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live from Hermes</div>'
+      + '<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:5px 0 18px">'
+        + '<div>'
+          + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:0 0 3px;font-weight:500">'+cfg.label+'</h1>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0">'
+            + (count!=null ? count.toLocaleString('en-US')+' record'+(count===1?'':'s') : '&nbsp;')
+          + '</p>'
+        + '</div>'
+        + addBtn
+      + '</div>'
+      + card
+      + listBlock;
   }
 
   // A panel with no rows says why. The sample datasets that used to fill this
@@ -1550,13 +1996,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // whether it is still a change.
   function editSubject(kind){
     if (kind === 'client') return (clientData && clientData.client) || {};
-    if (kind === 'policy') {
-      var list = (clientData && clientData.policies) || [];
-      for (var i=0;i<list.length;i++) if (list[i].policy_guid === policyOpen) return list[i];
-      return {};
-    }
+    if (kind === 'policy') return policyRecord() || {};
     if (kind === 'work') return workRecord() || {};
     if (kind === 'renewal') return selRenewal || {};
+    if (kind === 'deal') return dealRecord() || {};
     return {};
   }
 
@@ -1603,9 +2046,58 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
+    // Sorting: same column again flips direction, a new one starts ascending.
+    // Either way you go back to page 1 — staying on page 7 of a list you just
+    // re-ordered shows you rows you did not ask for.
+    if(el.hasAttribute('data-sort')){
+      var sp = el.getAttribute('data-sort').split(':'), sk = sp[0], si = parseInt(sp[1],10);
+      var sst = listFor(sk);
+      if (sst.sort === si) sst.dir = -sst.dir; else { sst.sort = si; sst.dir = 1; }
+      sst.page = 0;
+      render();
+      return;
+    }
+    if(el.hasAttribute('data-page')){
+      var pp = el.getAttribute('data-page').split(':'), pst = listFor(pp[0]);
+      pst.page += (pp[1] === 'next' ? 1 : -1);
+      if (pst.page < 0) pst.page = 0;
+      render();
+      return;
+    }
+    if(el.hasAttribute('data-board')){
+      pipelineBoard = el.getAttribute('data-board') === 'board';
+      render();
+      return;
+    }
+    // A pipeline deal — a board tile, a table row, or "new".
+    if(el.hasAttribute('data-deal')){
+      var dv = el.getAttribute('data-deal');
+      if (dv === 'new') { if (closeDeal()) { dealOpen = 'new'; dealDraft = {}; render(); } return; }
+      if (dealOpen && String(dealOpen) === dv) return;
+      if (!closeDeal()) return;
+      dealOpen = dv; render();
+      return;
+    }
+    // A policy row on the Policies list, or "new".
+    if(el.hasAttribute('data-policyrow')){
+      var pv = el.getAttribute('data-policyrow');
+      if (pv === 'new') {
+        if (!closePolicy(false)) return;
+        policyOpen = 'new';
+        // Opened from a client's page, the insured is already known.
+        policyDraft = (state.crmView === 'client' && clientData && clientData.client)
+          ? { insured_id: clientData.client.nowcerts_insured_guid,
+              insured_name: clientData.client.insured_name }
+          : {};
+        render();
+        return;
+      }
+      if (pv !== policyOpen && closePolicy(false)) { policyOpen = pv; render(); }
+      return;
+    }
     // Card actions, written "<kind>:<action>" so one branch serves every card.
     if(el.hasAttribute('data-edit')){
       var ea = el.getAttribute('data-edit').split(':'), ek = ea[0], act = ea[1];
@@ -1614,14 +2106,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         if(ek === 'client') closeClient();
         else if(ek === 'policy') closePolicy(false);
         else if(ek === 'work') closeWork();
+        else if(ek === 'deal') closeDeal();
         else { edits[ek] = {}; render(); }
         return;
       }
       if(act === 'save'){
         if(ek === 'client') saveClientEdits();
-        else if(ek === 'policy') savePolicyEdits();
+        else if(ek === 'policy') savePolicyEditsThenPush();
         else if(ek === 'work') saveWorkEdits();
         else if(ek === 'renewal') saveRenewalEdits();
+        else if(ek === 'deal') saveDealEdits();
+        return;
+      }
+      if(act === 'create'){
+        if(ek === 'policy') createPolicy();
+        else if(ek === 'deal') createDeal();
         return;
       }
       if(act === 'finish'){ finishWork(); return; }
@@ -1896,6 +2395,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     pull('/api/tasks').then(function(d){ if(applyTasks(d)){ homeFromLive(); render(); } });
     pull('/api/commissions').then(function(d){ if(applyCommissions(d)){ homeFromLive(); render(); } });
     pull('/api/cases').then(function(d){ if(applyCases(d)){ homeFromLive(); render(); } });
+    // The kanban's columns come from the backend, so the board and the stage
+    // move it performs cannot disagree about what a stage is.
+    pull('/api/pipeline/stages').then(function(d){
+      if (d && !d._error && Array.isArray(d.new_business)) { pipelineStages = d; render(); }
+    });
     pull('/api/carriers').then(function(d){ if(applyCarriers(d)) render(); });
     pull('/api/workspace-stats').then(function(d){ if(applyWorkspaceStats(d)) render(); });
   }
