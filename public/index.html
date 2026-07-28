@@ -822,6 +822,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['insured_name','Client', {wide:true}], ['line_of_business','Line of business'],
     ['carrier','Carrier'], ['premium_estimate','Premium estimate'],
     ['assigned_to_email','Owner'], ['next_action','Next action', {wide:true}],
+    // Required before a won deal can be filed in NowCerts — a policy cannot be
+    // recorded in the AMS without its number, and inventing one is not an option.
+    ['policy_number','Policy # (once bound)'],
     ['expected_close_date','Projected close', {date:true}],
     ['needed_by','Needed by', {date:true}],
     ['expiration_date','X-date (current cover expires)', {date:true}],
@@ -1543,7 +1546,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         alert('That change was refused:\n' + JSON.stringify((e && e.detail) || e));
       });
       edits.deal = {};
-      loadCrmView('pipeline', true);
+      // The stage call is the last step when there is one; it carries whether the
+      // AMS filing was queued or blocked.
+      var last = stage ? rs[rs.length - 1] : null;
+      return (last ? last.json().then(reportAmsOutcome) : Promise.resolve())
+        .then(function(){ loadCrmView('pipeline', true); });
     }).catch(saveUnreachable);
   }
 
@@ -1578,15 +1585,30 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     fetch('/api/opportunities/'+encodeURIComponent(id)+'/stage', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ stage:stage, moved_by:actingAs() })
-    }).then(function(r){
-      if (!r.ok) return r.json().then(function(e){
-        alert('That move was refused:\n' + JSON.stringify((e && e.detail) || e));
+    }).then(function(r){ return r.json().then(function(j){ return {ok:r.ok, j:j}; }); })
+      .then(function(res){
+        if (!res.ok) { alert('That move was refused:\n' + JSON.stringify((res.j && res.j.detail) || res.j)); return; }
+        reportAmsOutcome(res.j);
+        loadCrmView('pipeline', true);
+      }).catch(function(){
+        alert('Couldn\'t reach the server, so the deal did not move.\n\n'
+            + 'Check your connection and drag it again.');
       });
-      loadCrmView('pipeline', true);
-    }).catch(function(){
-      alert('Couldn\'t reach the server, so the deal did not move.\n\n'
-          + 'Check your connection and drag it again.');
-    });
+  }
+
+  // Winning a deal is the moment it has to exist in NowCerts. The move itself
+  // always succeeds — it is a CRM stage — so if the AMS filing could not be
+  // queued, that has to be said out loud here or the deal silently never lands.
+  function reportAmsOutcome(j){
+    if (!j) return;
+    if (j.ams_blocked) {
+      alert('Moved — but this deal has NOT been filed in NowCerts.\n\n'
+          + j.ams_blocked + '\n\n'
+          + 'Open the deal, fix that, and move it to Bound / Won again.');
+    } else if (j.ams_queued) {
+      alert('Won. Queued for NowCerts — the insured and the policy are filed there\n'
+          + 'on the next executor run.');
+    }
   }
 
   document.getElementById('app').addEventListener('dragstart', function(e){
