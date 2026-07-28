@@ -332,9 +332,22 @@ function serveStatic(reqPath, res){
     // clients pinned to an old shell indefinitely — the worker is what fetches
     // its own replacement.
     if (rel === '/sw.js') headers['Cache-Control'] = 'no-cache';
+    // A build stamp on the page itself. An app window left open for days has no
+    // way to notice a deploy: navigations are network-first, but nothing
+    // navigates until someone reloads, and nobody reloads a dashboard they
+    // believe is live.
+    if (rel === '/index.html') headers['X-Portal-Build'] = buildStamp();
     res.writeHead(200, headers);
     res.end(data);
   });
+}
+
+// mtime of the served page — changes on every deploy and on nothing else. Read
+// per call and tolerant of a missing file: a stamp that throws would take down
+// the page it exists to describe.
+function buildStamp(){
+  try { return String(Math.round(fs.statSync(path.join(PUBLIC_DIR, 'index.html')).mtimeMs)); }
+  catch { return '0'; }
 }
 
 const server = http.createServer((req, res) => {
