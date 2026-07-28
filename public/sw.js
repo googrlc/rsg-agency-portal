@@ -11,7 +11,7 @@
 //   /healthz   — a liveness probe that must reflect the live process
 //
 // Bumping CACHE invalidates the old shell on the next activate.
-const CACHE = 'rsg-portal-shell-v2';
+const CACHE = 'rsg-portal-shell-v3';
 
 const SHELL = [
   '/',

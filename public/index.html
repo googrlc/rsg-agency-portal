@@ -129,7 +129,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       : '<iframe src="'+src+'" style="flex:1;width:100%;border:0" title="'+backLabel+'" allow="clipboard-read; clipboard-write; fullscreen"></iframe>';
     return '<div style="position:absolute;inset:0;display:flex;flex-direction:column;background:#fff">'
       + '<div style="height:42px;flex:none;display:flex;align-items:center;gap:12px;padding:0 20px;background:#FBF9F4;border-bottom:1px solid #ECEAE2">'
-        + '<div '+dataAttr+'="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ '+backLabel+'</div>'
+        + '<div '+dataAttr+'="close" title="Back (Esc)" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ '+backLabel+'</div>'
         + '<div style="width:1px;height:18px;background:#E2E1DC"></div>'
         + '<span style="font-size:11.5px;color:#96999F">'+(subtitle||'Full app · live')+'</span>'
         + '<a href="'+src+'" target="_blank" rel="noopener" style="margin-left:auto;font-size:11.5px;color:#2563EB">Open in new tab ↗</a>'
@@ -210,9 +210,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     policies:  { label:'Policies', endpoint:'/api/policies', key:'policies',
                  cols:[['insured_name','Client'],['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status'],['expiration_date','Expires'],['annualized_premium','Annualized','money']] },
     pipeline:  { label:'Pipeline', endpoint:'/api/pipeline', key:'opportunities',
-                 cols:[['insured_name','Client'],['opportunity_type','Pipeline','dealtype'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['carrier','Carrier'],['next_action','Next action']] },
+                 // Carrier came off to make room for the two dates: it is on the
+                 // board tile and the deal card, and a pipeline you cannot date is
+                 // a list of names. Next action stays — it is the whole point.
+                 cols:[['insured_name','Client'],['opportunity_type','Pipeline','dealtype'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['projected_close_date','Close','closedate'],['expiration_date','X-date','date'],['next_action','Next action']] },
+    // X-date is what ranks a lead — it is the date their current cover runs out,
+    // and it is the reason to call today rather than in March.
     leads:     { label:'Leads',    endpoint:'/api/leads',    key:'leads',
-                 cols:[['name','Lead'],['prospect_type','Type'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
+                 cols:[['name','Lead'],['prospect_type','Type'],['x_date','X-date','date'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
     quotes:    { label:'Quotes',   endpoint:'/api/quotes',   key:'quotes',
                  cols:[['insured_name','Client'],['line_of_business','LOB'],['carrier','Carrier'],['premium','Premium','money'],['quote_number','Quote #'],['effective_date','Effective','date'],['status','Status','chip']] },
     cases:     { label:'Cases',    endpoint:'/api/cases',    key:'cases',
@@ -220,6 +225,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     tasks:     { label:'Tasks',    endpoint:'/api/tasks',    key:'tasks',
                  cols:[['title','Task'],['status','Status','chip'],['priority','Priority','chip'],['assignee','Assignee'],['due_at','Due','date'],['case_id','Scope','scope']] },
   };
+  // The Ask Hermes button floats over the bottom-right of every screen. Any pane
+  // that scrolls a list has to end above it, or its last row — and on a long list
+  // that means the pager's Next — sits underneath and cannot be clicked.
+  var AI_FAB_CLEARANCE = '86px';
+
   var crmData = {};      // view key -> rows | {_error}
   var clientData = null; // the open client's 360: record, policies, cases, tasks
   var policyOpen = null; // policy_guid of the policy being corrected, if any
@@ -459,7 +469,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>';
     }).join('');
 
-    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:#1B1D22;margin:0 0 3px;font-weight:500">Good morning, '+person.name+'.</h1>'
       + '<p style="font-size:14px;color:#6B7078;margin:0 0 18px">Your desks and your list, in one place.</p>'
       + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px">'+kpis+'</div>'
@@ -504,14 +514,55 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return '<span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 9px;color:'+c[0]+';background:'+c[1]+'">'+esc(label)+'</span>';
   }
   // A due date is the whole point of a task list, so say when it has passed.
-  function dueHtml(v){
+  //
+  // A bare date-only string parses as UTC midnight, which in Eastern time is the
+  // evening BEFORE — an x-date of the 1st rendered as "Sep 30". Read those as
+  // local dates instead; timestamps (which carry a zone) are left alone.
+  function dateMs(v){
+    var s = String(v);
+    var ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if(ymd) return new Date(+ymd[1], +ymd[2]-1, +ymd[3]).getTime();
+    return new Date(s).getTime();
+  }
+  function dueHtml(v, overdueWord){
     if(!v) return '—';
-    var t = new Date(v).getTime();
+    var t = dateMs(v);
     if(isNaN(t)) return esc(String(v));
     var d = new Date(t), today = new Date(); today.setHours(0,0,0,0);
-    var txt = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-    if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · overdue</span>';
+    // The year matters on a renewal or an x-date — "Sep 3" is a different call
+    // depending on whether it is this year's or next.
+    var opts = {month:'short',day:'numeric'};
+    if(d.getFullYear() !== today.getFullYear()) opts.year = 'numeric';
+    var txt = d.toLocaleDateString('en-US',opts);
+    if(t < today.getTime()) return '<span style="color:#B4231F;font-weight:600">'+txt+' · '+(overdueWord||'overdue')+'</span>';
     return esc(txt);
+  }
+  // A policy's term, as a period. "Renews in 30 days" reads very differently on a
+  // policy written last month than on one that has been in force a year, and the
+  // renewal list has never shown the start of the term at all.
+  function shortDate(v){
+    if (!v) return null;
+    var t = dateMs(v);
+    if (isNaN(t)) return null;
+    return new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  }
+  function policyPeriod(eff, exp){
+    var a = shortDate(eff), b = shortDate(exp);
+    if (a && b) return a + ' → ' + b;
+    return b ? 'ends ' + b : (a ? 'from ' + a : '—');
+  }
+  // A projected close date, with where it came from. "Slipped" rather than
+  // "overdue": a close date in the past is a deal that did not land when it was
+  // meant to, which is a conversation, not a missed chore.
+  function closeHtml(r, v){
+    if(!v) return '—';
+    var basis = r.projected_close_basis;
+    var html = dueHtml(v, 'slipped');
+    if(basis && basis !== 'set'){
+      html += '<span title="No close date set — showing the '+esc(basis)+' date."'
+            + ' style="color:#B9822A;font-size:11px"> ~</span>';
+    }
+    return html;
   }
   // NowCerts GUIDs are read-only: fine to show — they are how you match a record
   // against the AMS — but never editable. The enforcement is the override
@@ -521,6 +572,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(fmt==='money') txt = money(v);
     else if(fmt==='chip') txt = chipHtml(v);
     else if(fmt==='date') txt = dueHtml(v);
+    // A projected close nobody set is the backend's fallback (needed by, or the
+    // quote's effective date). Shown, because a dated pipeline beats an empty
+    // one — but marked, because a date nobody chose is not a commitment.
+    else if(fmt==='closedate') txt = closeHtml(r, v);
     else if(fmt==='person') txt = (v ? esc(nameFromEmail(v)) : '—');
     // Renewal work vs acquisition work — the table's version of the board's
     // two ladders, so the distinction survives when you sort or page.
@@ -546,7 +601,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // field writes into ('client', 'policy', 'work', 'renewal'); a field carries
   // its own kind so a single input handler can serve all of them.
   //
-  // opts: { overridden, options (a select), wide, area (a textarea), placeholder }
+  // opts: { overridden, options (a select), wide, area (a textarea), placeholder,
+  //         date (a date picker), hint (a line under the input) }
   function editField(kind, rec, key, label, opts){
     opts = opts || {};
     var buf = edits[kind];
@@ -554,6 +610,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var pending = Object.prototype.hasOwnProperty.call(buf, key);
     var corrected = Object.prototype.hasOwnProperty.call(ovr, key);
     var val = pending ? buf[key] : (rec[key] == null ? '' : String(rec[key]));
+    // A DATE column comes back as YYYY-MM-DD, but a corrected or synced value can
+    // arrive as a full timestamp; <input type="date"> silently shows nothing for
+    // anything longer, so the field would read as empty on a row that has a date.
+    if (opts.date) val = String(val).slice(0, 10);
     var id = kind + ':' + key;
     var box = 'border:1px solid '+(pending?'#B9822A':'#E6E6E2')+';border-radius:9px;padding:8px 11px;font:inherit;'
             + 'font-size:13px;color:#25282E;width:100%;box-sizing:border-box;background:'+(pending?'#FFFBF2':'#fff');
@@ -569,7 +629,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     } else if (opts.area) {
       control = '<textarea data-efield="'+id+'" rows="4" style="'+box+';resize:vertical;line-height:1.45">'+esc(val)+'</textarea>';
     } else {
-      control = '<input data-efield="'+id+'" value="'+esc(val)+'"'
+      control = '<input data-efield="'+id+'"'+(opts.date?' type="date"':'')+' value="'+esc(val)+'"'
         + (opts.placeholder ? ' placeholder="'+esc(opts.placeholder)+'"' : '')
         + ' style="'+box+'"/>';
     }
@@ -579,6 +639,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + (corrected ? ' <span title="Corrected in the portal. NowCerts still shows the old value." style="color:#B9822A">· corrected</span>' : '')
       + '</label>'
       + control
+      + (opts.hint ? '<span style="font-size:11px;color:#9A9EA6">'+esc(opts.hint)+'</span>' : '')
       + (corrected
           ? '<span style="font-size:11px;color:#9A9EA6">AMS: '+esc(ovr[key]==null?'(blank)':String(ovr[key]))+'</span>' : '')
     + '</div>';
@@ -735,12 +796,28 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // Opportunities are the CRM's own records — an edit is a real write, not an
   // override. The board's columns come from the backend so they cannot drift
   // from what a stage move will be allowed to set.
+  //
+  // The three dates are the forecast and its bounds. Projected close is ours to
+  // set; needed-by and the x-date come from NowCerts and say when the client
+  // needs cover in force and when their current cover runs out — which is what
+  // makes a close date credible or not.
   var DEAL_FIELDS = [
     ['insured_name','Client', {wide:true}], ['line_of_business','Line of business'],
     ['carrier','Carrier'], ['premium_estimate','Premium estimate'],
     ['assigned_to_email','Owner'], ['next_action','Next action', {wide:true}],
+    ['expected_close_date','Projected close', {date:true}],
+    ['needed_by','Needed by', {date:true}],
+    ['expiration_date','X-date (current cover expires)', {date:true}],
     ['description','Notes', {wide:true, area:true}],
   ];
+
+  // What the card shows under "Projected close" when nobody has set one.
+  function closeHint(rec){
+    if (!rec || rec.expected_close_date) return '';
+    if (!rec.projected_close_date) return 'Not set — this deal has no date on the board.';
+    return 'Not set. The board is showing the ' + (rec.projected_close_basis || '')
+         + ' date, ' + rec.projected_close_date + '.';
+  }
 
   function dealRecord(){
     if (dealOpen === 'new') return dealDraft;
@@ -807,7 +884,16 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '</div>')
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
         + (isNew ? editField('deal', rec, 'insured_id', 'Client (NowCerts insured ID)', {wide:true}) : '')
-        + DEAL_FIELDS.map(function(f){ return editField('deal', rec, f[0], f[1], f[2]); }).join('')
+        + DEAL_FIELDS.map(function(f){
+            // The projected-close field says, under itself, which date the board is
+            // falling back to — otherwise an empty box next to a dated tile reads
+            // as a bug.
+            var o = f[2];
+            if (f[0] === 'expected_close_date') {
+              o = Object.assign({}, o || {}, { hint: closeHint(rec) });
+            }
+            return editField('deal', rec, f[0], f[1], o);
+          }).join('')
         + (pipelineStages && pipelineStages.types
             ? editField('deal', rec, 'opportunity_type', 'Pipeline', {options:pipelineStages.types}) : '')
         + (stages ? editField('deal', rec, 'stage', 'Stage', {options:stages}) : '')
@@ -868,10 +954,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
   function dealTile(r){
     var prem = r.premium_estimate != null ? money(r.premium_estimate) : '';
-    return '<div class="tile" data-deal="'+esc(r.id)+'" style="background:#fff;border:1px solid #E7E7E4;border-radius:10px;padding:10px 11px;cursor:pointer">'
+    // The date belongs on the card, not one click away: a column of tiles with no
+    // dates cannot answer "what lands this month", which is the question a board
+    // exists to answer. Renewals are dated by the policy they renew, everything
+    // else by its projected close.
+    var ren = isRenewalDeal(r);
+    var when = ren ? r.expiration_date : r.projected_close_date;
+    var dateLine = when
+      ? '<div style="font-size:11px;color:#6B7078;margin-top:5px">'
+        + (ren ? 'Expires ' : 'Close ') + (ren ? dueHtml(when) : closeHtml(r, when)) + '</div>'
+      : '';
+    return '<div class="tile" draggable="true" data-deal="'+esc(r.id)+'" style="background:#fff;border:1px solid #E7E7E4;border-radius:10px;padding:10px 11px;cursor:grab">'
       + '<div style="font-size:12.5px;color:#1B1D22;font-weight:500;line-height:1.35">'+esc(r.insured_name || '—')+'</div>'
       + '<div style="font-size:11.5px;color:#787C84;margin-top:3px">'+esc(r.line_of_business || '—')+'</div>'
       + (prem ? '<div style="font-size:12px;color:#2F6B4F;font-weight:600;margin-top:5px">'+prem+'</div>' : '')
+      + dateLine
       + (r.carrier ? '<div style="font-size:11px;color:#9A9EA6;margin-top:2px">'+esc(r.carrier)+'</div>' : '')
       + (r.opportunity_type && r.opportunity_type !== 'New Business' && !isRenewalDeal(r)
           ? '<div style="margin-top:6px">'+dealTypeChip(r)+'</div>' : '')
@@ -970,9 +1067,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var rec = d.client, ovr = rec._overridden || {};
     var dirty = Object.keys(edits.client).length;
 
-    return '<div style="position:absolute;inset:0;overflow:auto;padding:22px 26px">'
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:22px 26px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">'
-        + '<div data-client="close" style="font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Clients</div>'
+        + '<div data-client="close" title="Back (Esc)" style="font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Clients</div>'
         + '<div style="width:1px;height:16px;background:#E2E1DC"></div>'
         + '<span style="font-size:11.5px;color:#96999F">Saving a correction also writes it to NowCerts — it will ask first</span>'
       + '</div>'
@@ -1068,7 +1165,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }).then(function(){
       edits.client = {};
       openClient(guid, true);  // re-read so the saved values come back from the API
-    });
+    }).catch(saveUnreachable);
   }
 
   // ---- Saving, and what it means -------------------------------------------
@@ -1158,7 +1255,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       edits.policy = {};
       if (state.crmView === 'client' && state.client) openClient(state.client, true);
       else { loadCrmView('policies', true); }
-    });
+    }).catch(saveUnreachable);
   }
 
   function createPolicy(){
@@ -1182,7 +1279,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         policyOpen = null; policyDraft = {}; edits.policy = {};
         alert('Created in NowCerts. It appears in the CRM after the next sync.');
         render();
-      });
+      }).catch(saveUnreachable);
   }
 
   // ---- Pipeline writes ------------------------------------------------------
@@ -1222,7 +1319,112 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       });
       edits.deal = {};
       loadCrmView('pipeline', true);
+    }).catch(saveUnreachable);
+  }
+
+  // ---- Dragging a deal across the board -------------------------------------
+  // The board shipped with columns, tiles and a data-stagecol on every column —
+  // and nothing that listened for a drag. Moving a deal meant opening it and
+  // changing a dropdown, which is not what a kanban is for.
+  //
+  // The handlers are delegated off #app because render() replaces its innerHTML
+  // wholesale: anything bound to a tile would be thrown away on the next paint.
+  // The drag itself is deliberately kept out of state — highlighting the column
+  // under the cursor by re-rendering the page on every dragover would fight the
+  // browser's own drag image.
+  var dragDeal = null;
+
+  function stageColumnAt(el){
+    return el && el.closest ? el.closest('[data-stagecol]') : null;
+  }
+  function markDropTarget(col, on){
+    if (!col) return;
+    col.style.background = on ? '#F0F5F1' : '#FAFAF7';
+    col.style.borderColor = on ? '#2F6B4F' : '#EFEFEB';
+  }
+  function clearDropTargets(){
+    var cols = document.querySelectorAll('[data-stagecol]');
+    for (var i=0;i<cols.length;i++) markDropTarget(cols[i], false);
+  }
+
+  // The write. Same endpoint the Stage dropdown uses, so a drag and an edit have
+  // identical side effects (status, probability, likelihood) on the backend.
+  function moveDealToStage(id, stage){
+    fetch('/api/opportunities/'+encodeURIComponent(id)+'/stage', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ stage:stage, moved_by:actingAs() })
+    }).then(function(r){
+      if (!r.ok) return r.json().then(function(e){
+        alert('That move was refused:\n' + JSON.stringify((e && e.detail) || e));
+      });
+      loadCrmView('pipeline', true);
+    }).catch(function(){
+      alert('Couldn\'t reach the server, so the deal did not move.\n\n'
+          + 'Check your connection and drag it again.');
     });
+  }
+
+  document.getElementById('app').addEventListener('dragstart', function(e){
+    var tile = e.target.closest ? e.target.closest('[data-deal]') : null;
+    if (!tile || tile.getAttribute('data-deal') === 'new') return;
+    dragDeal = tile.getAttribute('data-deal');
+    tile.style.opacity = '.45';
+    // Firefox refuses to start a drag unless something is on the dataTransfer.
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', dragDeal); } catch (err) {}
+    }
+  });
+
+  document.getElementById('app').addEventListener('dragend', function(e){
+    var tile = e.target.closest ? e.target.closest('[data-deal]') : null;
+    if (tile) tile.style.opacity = '';
+    dragDeal = null;
+    clearDropTargets();
+  });
+
+  // Without preventDefault on dragover the browser treats the column as a place
+  // you cannot drop, and the tile springs back with no explanation.
+  document.getElementById('app').addEventListener('dragover', function(e){
+    if (!dragDeal) return;
+    var col = stageColumnAt(e.target);
+    if (!col) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    markDropTarget(col, true);
+  });
+
+  document.getElementById('app').addEventListener('dragleave', function(e){
+    var col = stageColumnAt(e.target);
+    // Moving between children of the same column fires dragleave too; only clear
+    // when the cursor has actually left the column's box.
+    if (col && !col.contains(e.relatedTarget)) markDropTarget(col, false);
+  });
+
+  document.getElementById('app').addEventListener('drop', function(e){
+    if (!dragDeal) return;
+    var col = stageColumnAt(e.target);
+    if (!col) return;
+    e.preventDefault();
+    var id = dragDeal, stage = col.getAttribute('data-stagecol');
+    dragDeal = null;
+    clearDropTargets();
+    // Dropping a card back where it started is not a move; firing the stage
+    // endpoint anyway would re-stamp the row and claim it from the AMS sync.
+    var rows = (crmData.pipeline || {}).rows || [];
+    for (var i=0;i<rows.length;i++){
+      if (String(rows[i].id) === String(id) && rows[i].stage === stage) return;
+    }
+    moveDealToStage(id, stage);
+  });
+
+  // A dropped connection used to land here as an unhandled rejection: no alert,
+  // no reload, the typed edits still sitting on screen looking saved. Say so, and
+  // leave the buffer alone so Save can simply be pressed again.
+  function saveUnreachable(err){
+    alert('Couldn\'t reach the server, so nothing was saved.\n\n'
+        + 'Your changes are still on the card — check your connection and press Save again.'
+        + (err && err.message ? '\n\n(' + err.message + ')' : ''));
   }
 
   function createDeal(){
@@ -1232,6 +1434,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
                  insured_name:d.insured_name || null, carrier:d.carrier || null,
                  assigned_to_email:d.assigned_to_email || null,
                  next_action:d.next_action || null, description:d.description || null,
+                 expected_close_date:d.expected_close_date || null,
                  stage:d.stage || null, source:'manual', created_by:actingAs() };
     if (d.premium_estimate) body.premium_estimate = parseFloat(String(d.premium_estimate).replace(/[^0-9.\-]/g,''));
     fetch('/api/opportunities', { method:'POST', headers:{'Content-Type':'application/json'},
@@ -1241,7 +1444,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         if (!res.ok) { alert('That deal was refused:\n' + JSON.stringify(res.j.detail || res.j)); return; }
         dealOpen = null; dealDraft = {}; edits.deal = {};
         loadCrmView('pipeline', true);
-      });
+      }).catch(saveUnreachable);
   }
 
   function actingAs(){
@@ -1277,7 +1480,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if (err) { alert('That change was refused:\n' + JSON.stringify(err)); return; }
       edits.work = {};
       reloadWork();
-    });
+    }).catch(saveUnreachable);
   }
 
   // Completing a task is a status write. Closing a case is not: it checks the
@@ -1321,7 +1524,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         // is also the end of working it — close the card and show the list.
         if (isTask) { var k = workOpen; workOpen = null; reloadWorkFor(k); return; }
         reloadWork();
-      });
+      }).catch(saveUnreachable);
   }
 
   function deleteWork(){
@@ -1344,7 +1547,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       workOpen = null; edits.work = {};
       if (state.crmView === 'client' && state.client) openClient(state.client, true);
       else loadCrmView(kind === 'task' ? 'tasks' : 'cases', true);
-    });
+    }).catch(saveUnreachable);
   }
 
   // ---- Renewal detail -------------------------------------------------------
@@ -1355,7 +1558,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var RENEWAL_FIELDS = [
     ['premium_current','Premium (current)'], ['premium_renewal','Premium (renewal)'],
     ['risk_status','Risk', {options:RENEWAL_RISK}],
-    ['last_contact_date','Last contact', {placeholder:'YYYY-MM-DD'}],
+    // A DATE column, so a date picker is safe here — unlike a task's due_at,
+    // which is a timestamp and would lose its time to one.
+    ['last_contact_date','Last contact', {date:true}],
     ['ai_strategy_notes','Strategy note', {wide:true, area:true}],
   ];
 
@@ -1386,7 +1591,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         }
         render();
       });
-    });
+    }).catch(saveUnreachable);
   }
 
   // ---- Sorting and paging a list -------------------------------------------
@@ -1458,7 +1663,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var v = row[col[0]], fmt = col[2];
     if (v == null || v === '') return null;
     if (fmt === 'money') { var n = parseFloat(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n) ? null : n; }
-    if (fmt === 'date')  { var t = new Date(v).getTime(); return isNaN(t) ? null : t; }
+    if (fmt === 'date' || fmt === 'closedate') { var t = dateMs(v); return isNaN(t) ? null : t; }
     return String(v).toLowerCase();
   }
 
@@ -1705,7 +1910,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       // position:relative matters: the client 360 is an inset:0 overlay, and
       // without a positioned parent here it resolves against the CRM root and
       // paints straight over this screen's own sidebar.
-      + '<div style="flex:1;min-width:0;position:relative;overflow:auto;padding:24px 26px">'
+      // padding-bottom clears the Ask Hermes button, which floats over the
+      // bottom-right of this pane. Without it the last thing on a scrolled list —
+      // the pager, whose Next sits in exactly that corner — is unclickable.
+      + '<div style="flex:1;min-width:0;position:relative;overflow:auto;padding:24px 26px '+AI_FAB_CLEARANCE+'">'
         + (view === 'client' ? renderClientDetail()
           : view !== 'workspace' ? crmTable(view)
           : '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#96999F;font-weight:700">Live Supabase model</div>'
@@ -1726,10 +1934,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       // Live rows carry their own status colors; sample rows look them up.
       var sc = r.statusColor || (rStat[r.status]||['#6B7078','#EFEFEC'])[0];
       var sb = r.statusBg || (rStat[r.status]||['#6B7078','#EFEFEC'])[1];
-      return '<div class="tile rowh" data-detail="open" data-idx="'+i+'" style="display:grid;grid-template-columns:1.6fr 1.2fr .9fr .9fr 1fr .9fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+r.client+'</span><span style="font-size:12.5px;color:#6B7078">'+r.line+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.premium+'</span><span style="font-size:12.5px;color:#3D4149">'+r.days+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+sc+';background:'+sb+'">'+r.status+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
+      return '<div class="tile rowh" data-detail="open" data-idx="'+i+'" style="display:grid;grid-template-columns:1.5fr 1fr .8fr 1.4fr .8fr .9fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:15px;color:#1B1D22">'+r.client+'</span><span style="font-size:12.5px;color:#6B7078">'+r.line+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.premium+'</span><span style="font-size:12px;color:#6B7078;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(r.period||'—')+'</span><span style="font-size:12.5px;color:#3D4149">'+r.days+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+sc+';background:'+sb+'">'+r.status+'</span></span></div>';
     }).join('');
 
-    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#C2410C;font-weight:700">Retention workstation</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Keep the book on the books.</h1>'
       + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Every policy inside its renewal window, ranked by risk. Fed from CRM policy mirrors; owners and status write back to Supabase.</p>'
@@ -1744,7 +1952,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:12px;color:#96999F">Sorted by soonest</span>'
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="display:grid;grid-template-columns:1.6fr 1.2fr .9fr .9fr 1fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Renews in</span><span>Status</span><span>Owner</span></div>'
+        + '<div style="display:grid;grid-template-columns:1.5fr 1fr .8fr 1.4fr .8fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Policy period</span><span>Renews in</span><span>Status</span></div>'
         + (rows || panelEmpty('renewals', 'renewals'))
       + '</div>'
     + '</div>';
@@ -1761,7 +1969,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       status: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[0],
       statusColor: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[1],
       statusBg: (renewalStatusMap[live.risk_status]||['—','#6B7078','#EFEFEC'])[2],
-      renews: (live.expiration_date||'—')+(live.days_until!=null?' ('+live.days_until+'d)':''),
+      renews: (shortDate(live.expiration_date)||live.expiration_date||'—')+(live.days_until!=null?' ('+live.days_until+'d)':''),
       contact:'—', phone:'', email:'',
       address:'Insured detail loads from NowCerts on demand.',
       note: live.ai_strategy_notes || 'No strategy note on file.'
@@ -1775,7 +1983,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       // premiums, so it moves when they do.
       var readOnly = [
         { label:'Policy #', value:live.policy_number||'—' },
-        { label:'Expiration', value:live.expiration_date||'—' },
+        { label:'Carrier', value:live.carrier||'—' },
+        // Both ends of the term, from the book. Expiration alone cannot tell you
+        // whether this is an annual policy up for its first renewal or a
+        // six-month one you have already renewed twice.
+        { label:'Effective', value:shortDate(live.effective_date)||'—' },
+        { label:'Expiration', value:shortDate(live.expiration_date)||live.expiration_date||'—' },
         { label:'Renews in', value:live.days_until!=null?(live.days_until+' days'):'—' },
         { label:'Change', value:live.increase_percentage!=null?((live.increase_percentage>0?'+':'')+Number(live.increase_percentage).toFixed(1)+'%'):'—' },
       ];
@@ -1802,7 +2015,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
     var detail = '<div style="'+detailStyle+'">'
       + '<div style="position:sticky;top:0;background:#FBF9F4;border-bottom:1px solid #ECEAE2;padding:14px 26px;display:flex;align-items:center;gap:14px;z-index:2">'
-        + '<div data-detail="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Renewals</div>'
+        + '<div data-detail="close" title="Back (Esc)" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Renewals</div>'
         + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
         + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+dv.client+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+dv.statusColor+';background:'+dv.statusBg+'">'+dv.status+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+dv.line+' · renews '+dv.renews+'</div></div>'
         + '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#C2410C;background:#F7EAE1;border:1px solid #f0d8c9;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Start renewal</span>'
@@ -1853,7 +2066,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return '<div class="tile rowh"'+openAttr+' style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.subj+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+cc+';background:'+cb+'">'+r.cat+'</span></span><span style="font-size:12.5px;color:#6B7078">'+r.tasks+'</span><span style="font-size:12.5px;color:#6B7078">'+r.age+'</span><span style="font-size:12.5px;font-weight:'+statusWeight+';color:'+statusColor+'">'+r.status+'</span><span style="font-size:12.5px;color:#6B7078">'+r.owner+'</span></div>';
     }).join('');
 
-    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#2563EB;font-weight:700">Service workstation</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Everything the book needs done.</h1>'
       + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Cases group the work; tasks are the steps inside them. Both write back to Supabase and link to the client in CRM.</p>'
@@ -1885,7 +2098,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
     var detail = '<div style="'+caseDetailStyle+'">'
       + '<div style="position:sticky;top:0;background:#FBF9F4;border-bottom:1px solid #ECEAE2;padding:14px 26px;display:flex;align-items:center;gap:14px;z-index:2">'
-        + '<div data-casedetail="close" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Tasks &amp; Cases</div>'
+        + '<div data-casedetail="close" title="Back (Esc)" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Tasks &amp; Cases</div>'
         + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
         + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+dcase.subj+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+dcase.catColor+';background:'+dcase.catBg+'">'+dcase.cat+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:#B4231F;background:#FBE9E7">'+dcase.status+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+dcase.client+' · opened '+dcase.opened+' · '+dcase.owner+'</div></div>'
         + '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#fff;background:#16233F;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Add task +</span>'
@@ -1927,7 +2140,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return '<div class="tile rowh" style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
     }).join('');
 
-    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
         + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#B9822A;font-weight:700">Money workstation</div>'
           + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Chase what\'s owed.</h1>'
@@ -1994,7 +2207,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '</div>'
         + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden"><div id="carrierResults"></div></div>')
       : '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:30px;text-align:center;color:#9A9EA6;font-size:13px">Loading carrier directory…</div>';
-    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px">'
+    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
         + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#2563EB;font-weight:700">Markets & appointments</div>'
           + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Where the business goes.</h1>'
@@ -2178,6 +2391,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(!buf) return;
     var rec = editSubject(kind);
     var original = rec[f] == null ? '' : String(rec[f]);
+    // A date input can only ever hold YYYY-MM-DD. Compared against a stored
+    // timestamp the field would read as changed the moment it was rendered, and
+    // every card with a date on it would open already dirty.
+    if(t.type === 'date') original = original.slice(0, 10);
     var wasDirty = Object.keys(buf).length > 0;
     if(t.value === original) delete buf[f];
     else buf[f] = t.value;
@@ -2198,16 +2415,46 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }
   });
 
-  // Escape closes the innermost surface you are in, one at a time. On document,
-  // not #app: after a save the focused input is gone and the keystroke would
-  // otherwise land on <body> and do nothing.
+  // Escape backs out of whatever you are in, innermost first, one layer per
+  // press — the keyboard equivalent of the ‹ link, on every panel rather than
+  // the three it used to cover. Several of these panels are opened by clicking a
+  // row and closed only by a small ‹ in one corner; on the embeds that corner is
+  // above an iframe that has swallowed the pointer.
+  //
+  // On document, not #app: after a save the focused input is gone and the
+  // keystroke would otherwise land on <body> and do nothing.
+  //
+  // The ones with unsaved buffers go through their own close functions, so
+  // Escape asks about discarding exactly as the × does.
+  function backOut(){
+    if(state.aiOpen){ setState({ aiOpen:false }); return true; }
+    if(workOpen) return closeWork();
+    if(policyOpen) return closePolicy(false);
+    if(dealOpen) return closeDeal();
+    // Renewal detail: its own edit buffer, so it asks like the rest.
+    if(state.screen === 'renewals' && state.detail){
+      if(!unsavedOk(Object.keys(edits.renewal).length)) return false;
+      edits.renewal = {}; selRenewal = null;
+      setState({ detail:false });
+      return true;
+    }
+    if(state.screen === 'cases' && state.caseDetail){ setState({ caseDetail:false }); return true; }
+    if(state.carrierEmbed){ setState({ carrierEmbed:false }); return true; }
+    if(state.financeEmbed){ setState({ financeEmbed:false }); return true; }
+    if(state.screen === 'crm' && state.client) return closeClient();
+    if(state.screen === 'crm' && state.crmView !== 'workspace'){
+      setState({ crmView:'workspace' });
+      return true;
+    }
+    if(state.screen !== 'home'){ setState({ screen:'home' }); return true; }
+    return false;
+  }
+
   document.addEventListener('keydown', function(e){
     if(e.key !== 'Escape') return;
-    if(state.screen !== 'crm') return;
-    if(workOpen){ closeWork(); return; }
-    if(state.crmView !== 'client') return;
-    if(policyOpen){ closePolicy(false); return; }
-    if(state.client) closeClient();
+    // Let a native picker (a date field's calendar) take its own Escape first.
+    if(e.target && e.target.tagName === 'INPUT' && e.target.type === 'date'){ e.target.blur(); return; }
+    backOut();
   });
 
   document.getElementById('app').addEventListener('click', function(e){
@@ -2428,7 +2675,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var up = d.upcoming;
     renewalRows = up.slice(0,14).map(function(r){
       var m = renewalStatusMap[r.risk_status] || ['—','#6B7078','#EFEFEC'];
-      return { client:r.client_name||'—', line:r.policy_number||'—', premium:money(r.premium_current),
+      // The Line column has always shown a policy number, because the renewal
+      // table stores no line. Now that the book supplies one, show the line and
+      // keep the policy number as the fallback.
+      return { client:r.client_name||'—', line:r.lines_of_business||r.policy_number||'—',
+               premium:money(r.premium_current),
+               period:policyPeriod(r.effective_date, r.expiration_date),
                days:(r.days_until!=null?(r.days_until+(r.days_until===1?' day':' days')):'—'),
                status:m[0], statusColor:m[1], statusBg:m[2], owner:'—', _raw:r };
     });
