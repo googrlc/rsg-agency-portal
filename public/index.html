@@ -210,7 +210,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     policies:  { label:'Policies', endpoint:'/api/policies', key:'policies',
                  cols:[['insured_name','Client'],['policy_number','Policy #'],['carrier','Carrier'],['lines_of_business','LOB'],['status','Status'],['expiration_date','Expires'],['annualized_premium','Annualized','money']] },
     pipeline:  { label:'Pipeline', endpoint:'/api/pipeline', key:'opportunities',
-                 cols:[['insured_name','Client'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['carrier','Carrier'],['next_action','Next action']] },
+                 cols:[['insured_name','Client'],['opportunity_type','Pipeline','dealtype'],['line_of_business','LOB'],['stage','Stage'],['premium_estimate','Est. premium','money'],['carrier','Carrier'],['next_action','Next action']] },
     leads:     { label:'Leads',    endpoint:'/api/leads',    key:'leads',
                  cols:[['name','Lead'],['prospect_type','Type'],['city','City'],['state','State'],['email','Email'],['phone','Phone']] },
     quotes:    { label:'Quotes',   endpoint:'/api/quotes',   key:'quotes',
@@ -234,6 +234,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var policyDraft = {};       // ditto for a new policy
   var pipelineStages = null;  // {new_business:[…], renewal:[…]} — from the backend
   var pipelineBoard = true;   // Pipeline shows the kanban; false = the table
+  // Which of the two pipelines the board is showing. Renewal work and
+  // acquisition work run on different stage ladders, so they get separate
+  // boards rather than one mixed funnel.
+  var pipelineKind = 'new_business';
 
   // Renewals
   var renewalKpis = [
@@ -518,6 +522,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     else if(fmt==='chip') txt = chipHtml(v);
     else if(fmt==='date') txt = dueHtml(v);
     else if(fmt==='person') txt = (v ? esc(nameFromEmail(v)) : '—');
+    // Renewal work vs acquisition work — the table's version of the board's
+    // two ladders, so the distinction survives when you sort or page.
+    else if(fmt==='dealtype') txt = (v ? dealTypeChip(r) : '—');
     // A task is case work, client work, or purely internal. Which it is, is the
     // difference between a task list and a pile.
     else if(fmt==='scope') txt = chipHtml(v ? 'case' : (r.insured_database_id ? 'client' : 'internal'));
@@ -742,14 +749,38 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return null;
   }
 
+  // Renewal work and acquisition work are two different pipelines that happen to
+  // share a table: different stage ladders, different questions, often different
+  // people. Mixed on one board they read as one funnel, and a renewal sitting in
+  // "Sent For Quoting" means nothing.
+  //
+  // Which types count as renewal comes from the backend — the same list that
+  // validates a stage move. A substring test here would sweep in "Remarket",
+  // which is a third thing again.
+  function isRenewalDeal(r){
+    var types = (pipelineStages && pipelineStages.renewal_types) || ['Renewals'];
+    return types.indexOf(String(r.opportunity_type || '').trim()) >= 0;
+  }
+
   function stageOptions(rec){
     var s = pipelineStages;
     if (!s) return null;
-    // A renewal deal is worked on the renewal ladder; everything else on the
-    // acquisition one. Offering all of them would let a renewal be dropped into
-    // "Sent For Quoting", which means nothing there.
-    var isRenewal = String(rec.opportunity_type || '').toLowerCase().indexOf('renew') >= 0;
-    return isRenewal ? s.renewal : s.new_business;
+    return isRenewalDeal(rec) ? s.renewal : s.new_business;
+  }
+
+  function splitDeals(rows){
+    var ren = [], nb = [];
+    (rows || []).forEach(function(r){ (isRenewalDeal(r) ? ren : nb).push(r); });
+    return { renewal: ren, new_business: nb };
+  }
+
+  // On any mixed list — the table, a client's opportunities — say which is which.
+  function dealTypeChip(r){
+    if (!r || !r.opportunity_type) return '';
+    var ren = isRenewalDeal(r);
+    return '<span style="font-size:10.5px;font-weight:700;border-radius:999px;padding:2px 8px;white-space:nowrap;'
+      + (ren ? 'color:#C2410C;background:#F7EAE1' : 'color:#2563EB;background:#E9EFFC')+'">'
+      + esc(ren ? 'Renewal' : r.opportunity_type) + '</span>';
   }
 
   function renderDealCard(){
@@ -777,6 +808,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:13px">'
         + (isNew ? editField('deal', rec, 'insured_id', 'Client (NowCerts insured ID)', {wide:true}) : '')
         + DEAL_FIELDS.map(function(f){ return editField('deal', rec, f[0], f[1], f[2]); }).join('')
+        + (pipelineStages && pipelineStages.types
+            ? editField('deal', rec, 'opportunity_type', 'Pipeline', {options:pipelineStages.types}) : '')
         + (stages ? editField('deal', rec, 'stage', 'Stage', {options:stages}) : '')
       + '</div>'
     + '</div>';
@@ -788,9 +821,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var d = crmData.pipeline || {};
     if (d.loading || (!d.rows && !d.error)) return '<div style="padding:26px 2px;font-size:12.5px;color:#96999F">Loading pipeline…</div>';
     if (d.error) return '<div style="padding:26px 2px;font-size:12.5px;color:#B4231F">Couldn\'t load the pipeline — '+esc(d.error)+'</div>';
-    var rows = d.rows || [];
-    var stages = (pipelineStages && pipelineStages.new_business) || [];
+    var split = splitDeals(d.rows || []);
+    var rows = split[pipelineKind] || [];
+    var stages = (pipelineStages && pipelineStages[pipelineKind]) || [];
     if (!stages.length) return '<div style="padding:26px 2px;font-size:12.5px;color:#96999F">Loading stages…</div>';
+    if (!rows.length) {
+      return '<div style="padding:26px 2px;font-size:12.5px;color:#96999F">No '
+        + (pipelineKind === 'renewal' ? 'renewal' : 'new-business') + ' deals on the board.</div>';
+    }
 
     // Anything whose stage is not on the board still has to appear somewhere —
     // a deal you cannot see is a deal nobody works.
@@ -820,7 +858,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + (stray.length
           ? '<div style="flex:0 0 262px;display:flex;flex-direction:column;background:#FBF4E9;border:1px solid #F0E2CB;border-radius:12px">'
             + '<div style="padding:11px 13px;border-bottom:1px solid #F0E2CB"><span style="font-size:12px;font-weight:700;color:#B9822A">Off the board</span>'
-            + '<div style="font-size:11px;color:#B9822A;margin-top:3px">'+stray.length+' on a stage this pipeline does not use</div></div>'
+            + '<div style="font-size:11px;color:#B9822A;margin-top:3px">'+stray.length+' on a stage the '
+              + (pipelineKind === 'renewal' ? 'renewal' : 'new-business') + ' ladder does not use</div></div>'
             + '<div style="flex:1;overflow:auto;padding:9px;display:flex;flex-direction:column;gap:8px">'+stray.map(dealTile).join('')+'</div>'
           + '</div>'
           : '')
@@ -834,6 +873,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '<div style="font-size:11.5px;color:#787C84;margin-top:3px">'+esc(r.line_of_business || '—')+'</div>'
       + (prem ? '<div style="font-size:12px;color:#2F6B4F;font-weight:600;margin-top:5px">'+prem+'</div>' : '')
       + (r.carrier ? '<div style="font-size:11px;color:#9A9EA6;margin-top:2px">'+esc(r.carrier)+'</div>' : '')
+      + (r.opportunity_type && r.opportunity_type !== 'New Business' && !isRenewalDeal(r)
+          ? '<div style="margin-top:6px">'+dealTypeChip(r)+'</div>' : '')
     + '</div>';
   }
 
@@ -1574,7 +1615,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       // The board is the pipeline's natural shape; the table is still there for
       // sorting and paging, which a board cannot do.
       var tab = 'font-size:12px;font-weight:600;border-radius:8px;padding:6px 12px;cursor:pointer;';
+      var sp = splitDeals(d.rows || []);
+      // Which pipeline you are looking at comes first — it changes what every
+      // column below it means.
+      var kindTab = function(k, label, n){
+        var on = pipelineKind === k;
+        return '<span data-kind="'+k+'" style="'+tab
+          + (on ? 'color:#fff;background:#16233F' : 'color:#3D4149;background:#fff;border:1px solid #E6E6E2')
+          + '">'+label+' · '+n+'</span>';
+      };
       addBtn = '<div style="display:flex;align-items:center;gap:8px">'
+        + (pipelineBoard
+            ? kindTab('new_business','New business', sp.new_business.length)
+              + kindTab('renewal','Renewals', sp.renewal.length)
+              + '<span style="width:1px;height:20px;background:#E2E1DC"></span>'
+            : '')
         + '<span data-board="board" style="'+tab+(pipelineBoard?'color:#fff;background:#3D4149':'color:#3D4149;background:#fff;border:1px solid #E6E6E2')+'">Board</span>'
         + '<span data-board="table" style="'+tab+(pipelineBoard?'color:#3D4149;background:#fff;border:1px solid #E6E6E2':'color:#fff;background:#3D4149')+'">Table</span>'
         + '<span data-deal="new" style="'+tab+'color:#fff;background:#16233F">Add deal +</span>'
@@ -2156,7 +2211,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
@@ -2181,6 +2236,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       var pp = el.getAttribute('data-page').split(':'), pst = listFor(pp[0]);
       pst.page += (pp[1] === 'next' ? 1 : -1);
       if (pst.page < 0) pst.page = 0;
+      render();
+      return;
+    }
+    if(el.hasAttribute('data-kind')){
+      pipelineKind = el.getAttribute('data-kind');
       render();
       return;
     }
