@@ -125,7 +125,16 @@ const WRITE_ROUTES = [
   // Renewal working detail: both premiums, the risk call, the strategy note.
   // The change percentage is generated in Postgres from the premiums, so it is
   // not writable here or anywhere else.
+  //
+  // Corrections go through /override, not the PATCH: project_85_renewals is
+  // re-projected from the candidate ledger every night, so a plain row write is
+  // reverted by morning. An override is a named, reversible decision that the
+  // rebuild is built to respect. DELETE takes a renewal off the worklist — it
+  // deletes no row, keeps the renewal's history, and reaches no AMS record.
   { m: 'PATCH',  re: /^\/api\/renewals\/([0-9a-f-]{36})$/ },
+  { m: 'POST',   re: /^\/api\/renewals\/([0-9a-f-]{36})\/override$/ },
+  { m: 'DELETE', re: /^\/api\/renewals\/([0-9a-f-]{36})$/ },
+  { m: 'DELETE', re: /^\/api\/renewals\/overrides\/([0-9a-f-]{36})$/ },
 
   // The lead station. Leads are CRM-owned and never reach NowCerts from here —
   // converting one opens a pipeline deal, which itself only writes to the AMS
@@ -188,6 +197,8 @@ const WRITE_ROUTES = [
 const READ_PATTERNS = [
   // Corrections that never landed in the AMS — the portal's banner.
   { re: /^\/api\/ams\/failed-pushes$/ },
+  // Corrections on renewals, including the removals — the undo list.
+  { re: /^\/api\/renewals\/overrides$/ },
   // Kanban columns. Same source as the stage-move validation, so the board and
   // the backend cannot disagree about what a stage is.
   { re: /^\/api\/pipeline\/stages$/ },
