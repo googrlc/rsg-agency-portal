@@ -971,7 +971,20 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       + '</div>';
     }).join('');
 
-    return '<div style="display:flex;gap:12px;align-items:stretch;overflow-x:auto;padding-bottom:10px;min-height:0">'
+    // The board is eight stages wide and the window fits about four. It has always
+    // scrolled, but nothing said so: no visible scrollbar on macOS, no grab
+    // cursor, and the only gesture that worked was a two-finger swipe most people
+    // never tried on a desktop app. So half the pipeline was invisible — including
+    // Bound/Won, which is the end everyone wants to see.
+    //
+    // Three ways through it now: the arrows, a click-drag on the background, and
+    // the arrow keys. The drag deliberately ignores anything starting on a card —
+    // cards are draggable to move a deal between stages, and stealing that gesture
+    // would break the board's main interaction to fix its navigation.
+    return '<div style="position:relative">'
+      + '<span data-boardpan="-1" title="Earlier stages" style="'+BOARD_ARROW+'left:-6px">‹</span>'
+      + '<span data-boardpan="1" title="Later stages" style="'+BOARD_ARROW+'right:-6px">›</span>'
+      + '<div id="pipeBoard" tabindex="0" style="display:flex;gap:12px;align-items:stretch;overflow-x:auto;padding-bottom:10px;min-height:0;scroll-behavior:smooth;cursor:grab;outline:none">'
       + cols
       + (stray.length
           ? '<div style="flex:0 0 262px;display:flex;flex-direction:column;background:#FBF4E9;border:1px solid #F0E2CB;border-radius:12px">'
@@ -981,7 +994,55 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
             + '<div style="flex:1;overflow:auto;padding:9px;display:flex;flex-direction:column;gap:8px">'+stray.map(dealTile).join('')+'</div>'
           + '</div>'
           : '')
+      + '</div>'
     + '</div>';
+  }
+
+  var BOARD_ARROW = 'position:absolute;top:50%;transform:translateY(-50%);z-index:3;width:30px;height:30px;'
+    + 'display:flex;align-items:center;justify-content:center;border-radius:50%;background:#fff;'
+    + 'border:1px solid #E2E1DC;box-shadow:0 2px 8px rgba(0,0,0,.10);cursor:pointer;'
+    + 'font-size:17px;color:#3D4149;user-select:none;';
+
+  // One column per press, so a click lands somewhere legible instead of halfway
+  // between two stages.
+  var BOARD_STEP = 274;   // 262px column + 12px gap
+
+  function panBoard(dir){
+    var b = document.getElementById('pipeBoard');
+    if (b) b.scrollLeft += dir * BOARD_STEP;
+  }
+
+  // Click-drag to pan, but only from the background. A drag that starts on a card
+  // is the card's — that gesture moves a deal to another stage.
+  function wireBoardDrag(){
+    var b = document.getElementById('pipeBoard');
+    if (!b || b.dataset.panWired) return;
+    b.dataset.panWired = '1';
+    var down = false, startX = 0, startLeft = 0, moved = false;
+    b.addEventListener('pointerdown', function(e){
+      if (e.target.closest('[data-deal]')) return;      // the card's drag, not ours
+      down = true; moved = false; startX = e.clientX; startLeft = b.scrollLeft;
+      b.style.scrollBehavior = 'auto'; b.style.cursor = 'grabbing';
+    });
+    b.addEventListener('pointermove', function(e){
+      if (!down) return;
+      var dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) moved = true;
+      b.scrollLeft = startLeft - dx;
+    });
+    var end = function(){
+      if (!down) return;
+      down = false; b.style.cursor = 'grab'; b.style.scrollBehavior = 'smooth';
+    };
+    b.addEventListener('pointerup', end);
+    b.addEventListener('pointerleave', end);
+    // A pan that moved should not also count as a click on whatever is under the
+    // cursor when you let go.
+    b.addEventListener('click', function(e){ if (moved) { e.stopPropagation(); moved = false; } }, true);
+    b.addEventListener('keydown', function(e){
+      if (e.key === 'ArrowRight') { panBoard(1); e.preventDefault(); }
+      if (e.key === 'ArrowLeft')  { panBoard(-1); e.preventDefault(); }
+    });
   }
 
   function dealTile(r){
@@ -2037,8 +2098,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // Sort by what the column MEANS, not by how it reads: money and premiums
   // compare as numbers, dates as time, everything else as text. Sorting a
   // premium column as text puts $9,100 above $40,000.
+  // A column may carry an accessor as its 4th entry. The hand-built views render
+  // formatted strings — "$1,170", "22 days", "3 days ago" — and sorting those as
+  // text is how $9,100 ends up above $40,000. The accessor reaches past the
+  // display value to the number or date underneath.
   function sortValue(row, col){
-    var v = row[col[0]], fmt = col[2];
+    var v = col[3] ? col[3](row) : row[col[0]], fmt = col[2];
     if (v == null || v === '') return null;
     if (fmt === 'money') { var n = parseFloat(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n) ? null : n; }
     if (fmt === 'date' || fmt === 'closedate') { var t = dateMs(v); return isNaN(t) ? null : t; }
@@ -2058,6 +2123,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if (y == null) return -1;
       return (x < y ? -1 : x > y ? 1 : 0) * st.dir;
     });
+  }
+
+  // The generic CRM table sorts through sortHeader/sortRows. Renewals, Cases and
+  // Finance built their headers by hand as plain <span>s and so could not be
+  // sorted at all — on a 50-row renewal worklist that means reading every row to
+  // find the biggest premium. Same machinery, same behaviour, same arrows.
+  function sortedFor(key, cols, rows){
+    return sortRows(rows, cols, listFor(key));
   }
 
   function sortHeader(key, cols){
@@ -2340,6 +2413,18 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // filtered anything. They now count the rows actually loaded and select them.
   // "Mine" is absent deliberately: renewals carry no owner, and a chip that
   // cannot answer its own question is worse than no chip.
+  // Sortable columns for the worklist. The accessors read the raw renewal, not
+  // the formatted cell: premium as a number, the renewal date as a date, days
+  // as an integer.
+  var RENEWAL_COLS = [
+    ['client','Client', null, function(r){ return (r._raw||{}).client_name; }],
+    ['line','Line', null, function(r){ var x=r._raw||{}; return x.lines_of_business || x.policy_number; }],
+    ['premium','Premium','money', function(r){ return (r._raw||{}).premium_current; }],
+    ['period','Policy period','date', function(r){ var x=r._raw||{}; return x.effective_date || x.expiration_date; }],
+    ['days','Renews in','money', function(r){ return (r._raw||{}).days_until; }],
+    ['status','Status', null, function(r){ return (r._raw||{}).risk_status; }],
+  ];
+
   var renewalFilter = 'all';
   var RENEWAL_FILTERS = [
     ['all',    'All',        function(){ return true; }],
@@ -2370,7 +2455,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
               || RENEWAL_FILTERS[0];
     // The card resolves its record by row index, so what is displayed and what
     // is indexed have to be the same array.
-    renewalShown = renewalRows.filter(chosen[2]);
+    renewalShown = sortedFor('renewals', RENEWAL_COLS, renewalRows.filter(chosen[2]));
 
     var rows = renewalShown.map(function(r,i){
       // Live rows carry their own status colors; sample rows look them up.
@@ -2390,7 +2475,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:12px;color:#96999F">Sorted by soonest</span>'
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="display:grid;grid-template-columns:1.5fr 1fr .8fr 1.4fr .8fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Policy period</span><span>Renews in</span><span>Status</span></div>'
+        + '<div style="display:grid;grid-template-columns:1.5fr 1fr .8fr 1.4fr .8fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('renewals', RENEWAL_COLS) + '</div>'
         + (rows || panelEmpty('renewals', 'renewals'))
       + '</div>'
       + removedRenewalsPanel()
@@ -2494,12 +2579,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return list + detail;
   }
 
+  var CASE_COLS = [
+    ['subj','Case'], ['client','Client'], ['cat','Type'], ['tasks','Tasks'],
+    // Age reads "3 days ago"; sort it by the timestamp underneath so oldest is
+    // oldest rather than alphabetical.
+    ['age','Age','date', function(r){ return (r._raw||{}).opened_at || (r._raw||{}).created_at; }],
+    ['status','Status'],
+    ['owner','Owner'],
+  ];
+
   function renderCases(){
     var kpis = tcKpis.map(function(k){
       return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
     }).join('');
 
-    var rows = caseRows.map(function(r){
+    var rows = sortedFor('cases', CASE_COLS, caseRows).map(function(r){
       // Live rows carry their own colors; sample rows look them up by category key.
       var cc = r.catColor || (cCat[r.cat]||['#2F6B4F','#EAF1EC'])[0];
       var cb = r.catBg || (cCat[r.cat]||['#2F6B4F','#EAF1EC'])[1];
@@ -2524,7 +2618,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">Mine · 6</span>'
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Case</span><span>Client</span><span>Type</span><span>Tasks</span><span>Age</span><span>Status</span><span>Owner</span></div>'
+        + '<div style="display:grid;grid-template-columns:1.9fr 1.2fr 1fr .8fr .6fr 1fr .8fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('cases', CASE_COLS) + '</div>'
         + (rows || panelEmpty('cases', 'cases'))
       + '</div>'
     + '</div>';
@@ -2576,12 +2670,18 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return list + detail;
   }
 
+  var FIN_COLS = [
+    ['carrier','Carrier'], ['policy','Policy'], ['client','Client'],
+    // expected/received render as "$1,170"; money sorting parses them back.
+    ['expected','Expected','money'], ['received','Received','money'], ['status','Status'],
+  ];
+
   function renderFinance(){
     if(state.financeEmbed){ return embedPane('Finance overview', COMMISSION_EMBED, 'data-finance', 'Full Commission Tracker · live'); }
     var kpis = finKpis.map(function(k){
       return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
     }).join('');
-    var rows = finRows.map(function(r){
+    var rows = sortedFor('finance', FIN_COLS, finRows).map(function(r){
       var s = r.statusColor ? [r.statusColor, r.statusBg] : (vStat[r.status] || ['#6B7078','#EFEFEC']);
       return '<div class="tile rowh" style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
     }).join('');
@@ -2601,7 +2701,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">This month</span>'
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Carrier</span><span>Policy</span><span>Client</span><span>Expected</span><span>Received</span><span>Status</span></div>'
+        + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('finance', FIN_COLS) + '</div>'
         + (rows || panelEmpty('commissions', 'commission rows'))
       + '</div>'
     + '</div>';
@@ -2808,6 +2908,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
     document.getElementById('app').innerHTML = html;
     if(state.screen==='carrier' && !state.carrierEmbed) wireCarrier();
+    // innerHTML replaces the board every render, so its listeners go with it.
+    wireBoardDrag();
     if(state.aiOpen) setTimeout(focusAi, 0);
   }
 
@@ -2922,7 +3024,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-renewalrestore],[data-renfilter],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-boardpan],[data-renewalrestore],[data-renfilter],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
@@ -2935,6 +3037,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return;
     }
     if(el.hasAttribute('data-retry')){ retryPush(el.getAttribute('data-retry')); return; }
+    if(el.hasAttribute('data-boardpan')){ panBoard(parseInt(el.getAttribute('data-boardpan'),10)); return; }
     if(el.hasAttribute('data-renewalrestore')){ restoreRenewal(el.getAttribute('data-renewalrestore')); return; }
     if(el.hasAttribute('data-renfilter')){ renewalFilter = el.getAttribute('data-renfilter'); render(); return; }
     if(el.hasAttribute('data-sort')){
@@ -3278,7 +3381,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
                tasks:'—',
                age:daysAgo(r.opened_at||r.created_at), status:status,
                statusColor:overdue?'#B4231F':'#3D4149', statusWeight:overdue?700:500,
-               owner:nameFromEmail(r.owner_email||r.owner||r.assignee) };
+               owner:nameFromEmail(r.owner_email||r.owner||r.assignee), _raw:r };
     });
     var ages = caseRows.map(function(c){ return parseInt(c.age,10); }).filter(function(v){ return !isNaN(v); });
     var avg = ages.length ? Math.round(ages.reduce(function(a,b){return a+b;},0)/ages.length) : null;
