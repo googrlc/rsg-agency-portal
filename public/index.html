@@ -265,6 +265,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   ];
   var rStat = { 'At risk':['#B4231F','#FBE9E7'],'In progress':['#B9822A','#F7EEDB'],'Quoted':['#2563EB','#E9EFFC'],'Confirmed':['#2F6B4F','#EAF1EC'],'Not started':['#6B7078','#EFEFEC'] };
   var renewalRows = [];
+  var renewalShown = [];   // the filtered slice the list is actually rendered from
   // Neutral placeholder for the renewal detail overlay before a row is picked.
   // Must keep every key the overlay reads — it dereferences these unguarded.
   var acme = { client:'—', line:'—', status:'—', statusColor:'#6B7078', statusBg:'#EFEFEC',
@@ -1876,34 +1877,99 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['ai_strategy_notes','Strategy note', {wide:true, area:true}],
   ];
 
+  // Saving a renewal is a correction, not a plain write. project_85_renewals is
+  // re-projected from the candidate ledger every night, so a value written
+  // straight onto the row is replaced by the AMS's version before morning —
+  // which is why a premium that came over wrong has always stayed wrong. Each
+  // field goes through /override, the same named, reversible decision the client
+  // and policy cards make, and that is what the rebuild is made to respect.
   function saveRenewalEdits(){
     var rec = selRenewal, fields = Object.keys(edits.renewal);
     if (!rec || !rec.id || !fields.length) return;
-    var body = {};
-    fields.forEach(function(f){
-      var v = edits.renewal[f];
-      if (v === '') { body[f] = null; return; }
-      body[f] = (f.indexOf('premium') === 0) ? parseFloat(String(v).replace(/[^0-9.\-]/g,'')) : v;
-    });
-    fetch('/api/renewals/'+encodeURIComponent(rec.id), {
-      method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
-    }).then(function(r){
-      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
-    }).then(function(err){
-      if (err) { alert('That change was refused:\n' + JSON.stringify(err)); return; }
+    var who = actingAs(), buf = edits.renewal;
+    Promise.all(fields.map(function(f){
+      var v = buf[f];
+      if (v === '') v = null;
+      else if (f.indexOf('premium') === 0) v = parseFloat(String(v).replace(/[^0-9.\-]/g,''));
+      return fetch('/api/renewals/'+encodeURIComponent(rec.id)+'/override', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ field_name:f, value:v, approved_by:who,
+                               reason:'corrected in the CRM' })
+      }).then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; }); });
+    })).then(function(errs){
+      var bad = errs.filter(Boolean);
+      if (bad.length) alert('Some corrections were refused:\n' + bad.map(function(b){ return typeof b==='string'?b:JSON.stringify(b); }).join('\n'));
       edits.renewal = {};
       // Re-read the cockpit so the recomputed change percentage comes from the
       // database rather than being guessed here.
-      pull('/api/renewals').then(function(d){
-        if (applyRenewals(d)) {
-          for (var i=0;i<renewalRows.length;i++){
-            var raw = renewalRows[i]._raw;
-            if (raw && String(raw.id) === String(rec.id)) selRenewal = raw;
-          }
-        }
-        render();
-      });
+      reloadRenewals(rec.id);
     }).catch(saveUnreachable);
+  }
+
+  // Off the worklist — not out of the database. renewal_actions hangs off this
+  // row, so a real delete would erase the record of the work already done on the
+  // renewal, and the nightly refresh would rebuild it from the same policy
+  // anyway. The backend records a removal on the renewal and on the event
+  // underneath it, which is what makes it stick.
+  function deleteRenewal(){
+    var rec = selRenewal;
+    if (!rec || !rec.id) return;
+    if (!confirm('Remove this renewal from the worklist?\n\n"'
+        + (rec.client_name || rec.policy_number || rec.id) + '"\n\n'
+        + 'It stops showing here and the nightly refresh will not put it back.\n'
+        + 'The renewal and its history are kept — this can be undone.')) return;
+    fetch('/api/renewals/'+encodeURIComponent(rec.id), {
+      method:'DELETE', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ deleted_by: actingAs(), reason:'removed from the CRM' })
+    }).then(function(r){
+      return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; });
+    }).then(function(err){
+      if (err) { alert('That renewal was not removed:\n' + JSON.stringify(err)); return; }
+      edits.renewal = {}; selRenewal = null;
+      setState({ detail:false });
+      // Re-read the removals as well as the list: a renewal that vanished with
+      // no way back and no record of who removed it is how a list stops being
+      // trusted. Both land in the same render.
+      loadRenewalRemovals().then(function(){ reloadRenewals(null); });
+    }).catch(saveUnreachable);
+  }
+
+  // The removals, and the way back. A delete nobody can undo is a delete people
+  // stop pressing — and the renewal it hid is then invisible rather than
+  // decided. Each removal is an override, so withdrawing it restores the row.
+  var renewalRemoved = [];
+
+  function loadRenewalRemovals(){
+    return pull('/api/renewals/overrides?status=active').then(function(d){
+      renewalRemoved = (d && !d._error && Array.isArray(d.overrides))
+        ? d.overrides.filter(function(o){ return o.field_name === 'dismissed'; })
+        : [];
+    }).catch(function(){ renewalRemoved = []; });
+  }
+
+  function restoreRenewal(id){
+    fetch('/api/renewals/overrides/'+encodeURIComponent(id)
+          + '?approved_by='+encodeURIComponent(actingAs()), { method:'DELETE' })
+      .then(function(r){ return r.ok ? null : r.json().then(function(e){ return (e && (e.detail || e._error)) || 'failed'; }); })
+      .then(function(err){
+        if (err) { alert('That renewal was not put back:\n' + JSON.stringify(err)); return; }
+        loadRenewalRemovals().then(function(){ reloadRenewals(null); });
+      }).catch(saveUnreachable);
+  }
+
+  // Re-read the list and re-point the open card at the row as the API now
+  // returns it. Passing no id closes the card's grip on a row that is gone.
+  function reloadRenewals(keepId){
+    return pull('/api/renewals').then(function(d){
+      if (applyRenewals(d)) {
+        selRenewal = null;
+        for (var i=0;i<renewalRows.length;i++){
+          var raw = renewalRows[i]._raw;
+          if (raw && keepId && String(raw.id) === String(keepId)) selRenewal = raw;
+        }
+      }
+      render();
+    });
   }
 
   // ---- Sorting and paging a list -------------------------------------------
@@ -2249,12 +2315,64 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     + '</div>';
   }
 
+  // What has been taken off the list, and who took it off. Shown only when
+  // there is something to show — a permanently empty "Removed" section teaches
+  // people to scroll past the one place their mistake is recoverable.
+  function removedRenewalsPanel(){
+    if (!renewalRemoved.length) return '';
+    return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:16px 20px;margin-top:18px">'
+      + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:16px;color:#1B1D22">Removed from the worklist</div>'
+      + '<div style="font-size:12px;color:#787C84;margin:3px 0 10px;line-height:1.5">These stay off the list through every nightly refresh. Their history is intact — put one back and it returns to the worklist.</div>'
+      + renewalRemoved.map(function(o){
+          return '<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid #F2F2EE">'
+            + '<span style="font-size:13px;color:#25282E;font-weight:500;min-width:130px">'+esc(o.entity_key||'—')+'</span>'
+            + '<span style="flex:1;min-width:0;font-size:12px;color:#6B7078;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+              + esc(o.reason||'removed') + ' · ' + esc(o.approved_by||'—')
+              + (o.approved_at ? ' · ' + esc(String(o.approved_at).slice(0,10)) : '') + '</span>'
+            + '<span data-renewalrestore="'+esc(o.id)+'" style="font-size:12px;font-weight:600;color:#2F6B4F;background:#EAF1EC;border-radius:8px;padding:6px 12px;cursor:pointer">Put back</span>'
+          + '</div>';
+        }).join('')
+    + '</div>';
+  }
+
+  // The filter chips carried hardcoded counts — "All · 38", "Mine · 16" — beside
+  // live rows, so the numbers contradicted the list under them and none of them
+  // filtered anything. They now count the rows actually loaded and select them.
+  // "Mine" is absent deliberately: renewals carry no owner, and a chip that
+  // cannot answer its own question is worse than no chip.
+  var renewalFilter = 'all';
+  var RENEWAL_FILTERS = [
+    ['all',    'All',        function(){ return true; }],
+    ['risk',   'At risk',    function(r){ return /CRITICAL|AT_RISK/.test((r._raw||{}).risk_status||''); }],
+    ['week',   'This week',  function(r){ var d=(r._raw||{}).days_until; return d!=null && d<=7; }],
+    ['fixed',  'Corrected',  function(r){ return !!((r._raw||{})._overridden); }],
+  ];
+
+  function renewalFilterChips(rows){
+    return RENEWAL_FILTERS.map(function(f){
+      var n = rows.filter(f[2]).length;
+      // A filter with nothing behind it stays visible but plainly empty, rather
+      // than disappearing and making the set of chips move around.
+      var on = renewalFilter === f[0];
+      var style = on ? 'color:#fff;background:#C2410C'
+                     : 'color:#3D4149;background:#fff;border:1px solid #E6E6E2';
+      return '<span data-renfilter="'+f[0]+'" style="font-size:12px;font-weight:600;border-radius:999px;padding:5px 13px;cursor:pointer;'+style+'">'
+        + f[1] + ' · ' + n + '</span>';
+    }).join('');
+  }
+
   function renderRenewals(){
     var kpis = renewalKpis.map(function(k){
       return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
     }).join('');
 
-    var rows = renewalRows.map(function(r,i){
+    var chosen = RENEWAL_FILTERS.filter(function(f){ return f[0] === renewalFilter; })[0]
+              || RENEWAL_FILTERS[0];
+    // The card resolves its record by row index, so what is displayed and what
+    // is indexed have to be the same array.
+    renewalShown = renewalRows.filter(chosen[2]);
+
+    var rows = renewalShown.map(function(r,i){
       // Live rows carry their own status colors; sample rows look them up.
       var sc = r.statusColor || (rStat[r.status]||['#6B7078','#EFEFEC'])[0];
       var sb = r.statusBg || (rStat[r.status]||['#6B7078','#EFEFEC'])[1];
@@ -2264,14 +2382,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#C2410C;font-weight:700">Retention workstation</div>'
       + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Keep the book on the books.</h1>'
-      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Every policy inside its renewal window, ranked by risk. Fed from CRM policy mirrors; owners and status write back to Supabase.</p>'
+      + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:620px;line-height:1.5">Every policy inside its renewal window, ranked by risk. Open one to correct what came over wrong, or to take it off the list — corrections hold through the nightly refresh and never reach NowCerts, so fix the AMS separately.</p>'
       + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
       + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px">'
-        + '<div style="display:flex;gap:7px">'
-          + '<span style="font-size:12px;font-weight:600;color:#fff;background:#C2410C;border-radius:999px;padding:5px 13px;cursor:pointer">All · 38</span>'
-          + '<span style="font-size:12px;font-weight:600;color:#B4231F;background:#FBE9E7;border-radius:999px;padding:5px 13px;cursor:pointer">At risk · 12</span>'
-          + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">This week · 5</span>'
-          + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">Mine · 16</span>'
+        + '<div style="display:flex;gap:7px">' + renewalFilterChips(renewalRows)
         + '</div>'
         + '<span style="font-size:12px;color:#96999F">Sorted by soonest</span>'
       + '</div>'
@@ -2279,6 +2393,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="display:grid;grid-template-columns:1.5fr 1fr .8fr 1.4fr .8fr .9fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700"><span>Client</span><span>Line</span><span>Premium</span><span>Policy period</span><span>Renews in</span><span>Status</span></div>'
         + (rows || panelEmpty('renewals', 'renewals'))
       + '</div>'
+      + removedRenewalsPanel()
     + '</div>';
 
     var detailOn = state.detail;
@@ -2319,7 +2434,13 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       facts = '<div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:11px 24px;padding:11px 13px;background:#FAFAF7;border:1px solid #EFEFEB;border-radius:10px">'
         + readOnly.map(function(f){ return '<div><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('')
         + '</div>'
-        + RENEWAL_FIELDS.map(function(f){ return editField('renewal', live, f[0], f[1], f[2]); }).join('');
+        + RENEWAL_FIELDS.map(function(f){
+            // What the AMS said before somebody corrected it, so the card shows
+            // a corrected number as a decision rather than as the book's word.
+            var o = {}; for (var k in (f[2]||{})) o[k] = f[2][k];
+            o.overridden = live._overridden || {};
+            return editField('renewal', live, f[0], f[1], o);
+          }).join('');
     } else {
       facts = detailFacts.map(function(f){ return '<div><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>'; }).join('');
     }
@@ -2343,6 +2464,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
         + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+dv.client+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+dv.statusColor+';background:'+dv.statusBg+'">'+dv.status+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+dv.line+' · renews '+dv.renews+'</div></div>'
         + '<span style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#C2410C;background:#F7EAE1;border:1px solid #f0d8c9;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Start renewal</span>'
+        + (live ? '<span data-edit="renewal:delete" title="Takes it off the worklist for good — the nightly refresh will not put it back" style="display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#B4231F;background:#FBE9E7;border:1px solid #f3d5d2;border-radius:8px;padding:6px 12px;font-weight:600;cursor:pointer">Remove</span>' : '')
         + '<span style="display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:#3D4149;background:#fff;border:1px solid #E2E1DC;border-radius:8px;padding:6px 12px;font-weight:500;cursor:pointer">Open in AMS ↗</span>'
       + '</div>'
       + '<div style="padding:24px 26px 40px;display:flex;gap:20px;align-items:flex-start;max-width:1000px">'
@@ -2800,7 +2922,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-renewalrestore],[data-renfilter],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
@@ -2813,6 +2935,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return;
     }
     if(el.hasAttribute('data-retry')){ retryPush(el.getAttribute('data-retry')); return; }
+    if(el.hasAttribute('data-renewalrestore')){ restoreRenewal(el.getAttribute('data-renewalrestore')); return; }
+    if(el.hasAttribute('data-renfilter')){ renewalFilter = el.getAttribute('data-renfilter'); render(); return; }
     if(el.hasAttribute('data-sort')){
       var sp = el.getAttribute('data-sort').split(':'), sk = sp[0], si = parseInt(sp[1],10);
       var sst = listFor(sk);
@@ -2906,7 +3030,12 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       if(act === 'note'){ (ek === 'deal' ? addDealNote : addLeadNote)(); return; }
       if(act === 'convert'){ convertLead(); return; }
       if(act === 'finish'){ finishWork(); return; }
-      if(act === 'delete'){ (ek === 'lead' ? deleteLead : deleteWork)(); return; }
+      if(act === 'delete'){
+        if(ek === 'lead') deleteLead();
+        else if(ek === 'renewal') deleteRenewal();
+        else deleteWork();
+        return;
+      }
       return;
     }
     // A row on the Cases screen: hand it to the CRM's case card, which is the
@@ -2996,7 +3125,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       var open = el.getAttribute('data-detail')==='open';
       if(open && sources.renewals==='live'){
         var idx = parseInt(el.getAttribute('data-idx'),10);
-        var row = renewalRows[idx];
+        var row = renewalShown[idx];
         selRenewal = (row && row._raw) ? row._raw : null;
       } else if(!open){
         selRenewal = null;
@@ -3179,6 +3308,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     // Tasks are now served from Supabase (agency_crm_tasks) — the dead-Espo path
     // was repointed 2026-07-24, so /api/tasks is safe to call again.
     pull('/api/renewals').then(function(d){ if(applyRenewals(d)){ homeFromLive(); render(); } });
+    // The removals ride along with the list they explain the absences from.
+    loadRenewalRemovals().then(render);
     pull('/api/tasks').then(function(d){ if(applyTasks(d)){ homeFromLive(); render(); } });
     pull('/api/commissions').then(function(d){ if(applyCommissions(d)){ homeFromLive(); render(); } });
     pull('/api/cases').then(function(d){ if(applyCases(d)){ homeFromLive(); render(); } });
