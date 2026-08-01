@@ -27,6 +27,10 @@ const path = require('path');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const API_BASE = (process.env.HERMES_API_URL || 'http://rsg-hermes-api:8787').replace(/\/+$/, '');
+
+// Per-service backend routing (see routing.js). Off unless the env vars are set.
+const { makeBackendFor } = require('./routing');
+const backendFor = makeBackendFor(API_BASE, process.env);
 // Carrier directory lives in the rsg-carrierhub app (different Supabase table +
 // service-role endpoint), reachable via the docker host gateway. No auth needed.
 const CARRIERHUB_URL = (process.env.CARRIERHUB_URL || 'http://172.17.0.1:3200').replace(/\/+$/, '');
@@ -406,7 +410,7 @@ const server = http.createServer((req, res) => {
     if (req.method !== 'GET') {
       const writeTarget = matchWrite(req.method, p);
       if (writeTarget) {
-        return proxyPass(req, res, API_BASE + writeTarget.path + (parsed.search || ''),
+        return proxyPass(req, res, backendFor(writeTarget.path) + writeTarget.path + (parsed.search || ''),
                          { timeoutMs: writeTarget.timeoutMs || TIMEOUT_MS });
       }
       return sendJson(res, 405, {
@@ -416,18 +420,18 @@ const server = http.createServer((req, res) => {
     }
     // Parameterised reads (case detail, checklist progress, template menu).
     const readTarget = matchRead(p);
-    if (readTarget) return proxyGet(API_BASE + readTarget + (parsed.search || ''), res);
+    if (readTarget) return proxyGet(backendFor(readTarget) + readTarget + (parsed.search || ''), res);
     // Carrier directory comes from the carrierhub app, not the hermes backend.
     if (p === '/api/carriers') {
       return proxyGet(CARRIERHUB_URL + '/api/carriers', res, { noAuth: true });
     }
     if (SLOW_ROUTES[p]) {
-      return proxyGet(API_BASE + SLOW_ROUTES[p] + (parsed.search || ''), res,
+      return proxyGet(backendFor(SLOW_ROUTES[p]) + SLOW_ROUTES[p] + (parsed.search || ''), res,
                       { timeoutMs: Math.max(TIMEOUT_MS, 45000) });
     }
     const backendPath = ROUTES[p];
     if (!backendPath) return sendJson(res, 404, { _error: 'unknown api route' });
-    return proxyGet(API_BASE + backendPath + (parsed.search || ''), res);
+    return proxyGet(backendFor(backendPath) + backendPath + (parsed.search || ''), res);
   }
 
   return serveStatic(p, res);
