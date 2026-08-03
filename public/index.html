@@ -46,6 +46,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var sources = { renewals:'pending', tasks:'pending', commissions:'pending', cases:'pending', carrier:'pending', workspace:'pending' };
   var financeOwed = null;   // summed from live commission rows
   var taskCount = 0;        // live task count across the team
+  // Pending re-poll of the KPI tiles while the backend is still on the mirror.
+  // Held so a burst of renders cannot stack timers on top of each other.
+  var workspaceStatsRepoll = null;
+  var workspaceStatsTries = 0;
 
   // Live records are interpolated straight into markup, and a client name is
   // free text someone typed into an AMS — escape it.
@@ -3400,7 +3404,15 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         // Retry once on a timeout: the backend stalls for ~30s whenever a live
         // AMS read is attempted and fails, and an 8s upstream timeout landing
         // inside that window blanks a panel that would otherwise be fine.
-        if(!_retried && d && d._error && /timeout/i.test(d._error)){
+        //
+        // 'unreachable' belongs here too, and used to be missed. server.js emits
+        // it for a refused connection, which is exactly what every redeploy of
+        // rsg-hermes-api looks like from the portal: the portal keeps running,
+        // the backend restarts under it, and whoever had the CRM open was left
+        // staring at a red panel until they thought to reload. That was the
+        // 2026-08-03 'Couldn't load clients' report — nothing was broken by then
+        // but the screen never went back on its own.
+        if(!_retried && d && d._error && /timeout|unreachable/i.test(d._error)){
           return new Promise(function(res){ setTimeout(res, 1200); }).then(function(){ return pull(path, true); });
         }
         return d;
@@ -3432,9 +3444,29 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   function applyWorkspaceStats(d){
     if(!d || d._error) return false;
     var n = function(v){ return v==null ? '—' : Number(v).toLocaleString('en-US'); };
+    // The backend serves the Supabase mirror while the AMS book warms after a
+    // restart, and says so with `provisional`. The mirror is a superset, not a
+    // near-copy — 450 policies against 340, $1.67M against $1.27M — so these two
+    // tiles read ~30% high for that first minute. Say it on the tile rather than
+    // letting a deploy quietly restate the size of the book, and re-poll so it
+    // corrects itself without anyone reloading.
+    // Bounded: a warming book settles inside a minute, but a genuinely down AMS
+    // stays provisional forever, and an unbounded re-poll would then hammer the
+    // backend for as long as the tab is open. After the cap the tile just keeps
+    // its honest 'provisional' label.
+    var provisional = !!d.provisional;
+    if(provisional && !workspaceStatsRepoll && workspaceStatsTries < 8){
+      workspaceStatsTries++;
+      workspaceStatsRepoll = setTimeout(function(){
+        workspaceStatsRepoll = null;
+        pull('/api/workspace-stats').then(function(x){ if(applyWorkspaceStats(x)) render(); });
+      }, 15000);
+    }
+    if(!provisional) workspaceStatsTries = 0;
+    var premiumSub = (d.annualized_premium!=null?money(d.annualized_premium)+' annualized':'annualized');
     crmKpis = [
       { label:'Clients', value:n(d.clients), sub:'canonical' },
-      { label:'Policies', value:n(d.policies), sub:(d.annualized_premium!=null?money(d.annualized_premium)+' annualized':'annualized') },
+      { label:'Policies', value:n(d.policies), sub:(provisional ? premiumSub+' · provisional, book still loading' : premiumSub) },
       { label:'Renewals', value:n(d.renewals), sub:'need attention' },
       { label:'Pipeline', value:n(d.pipeline), sub:'open opportunities' },
       { label:'Open cases', value:n(d.open_cases), sub:'service work' },
