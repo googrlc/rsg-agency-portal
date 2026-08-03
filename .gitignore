@@ -7,3 +7,9 @@
 node_modules/
 *.log
 .DS_Store
+
+# macOS AppleDouble sidecars. The box picks these up whenever files are copied
+# from a Mac, and 20 of them buried the real drift in `git status` on
+# hermes-gretch — which is how this repo's own deployed feature stayed
+# uncommitted long enough to be a problem.
+._*
