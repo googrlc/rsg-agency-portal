@@ -31,6 +31,7 @@ const API_BASE = (process.env.HERMES_API_URL || 'http://rsg-hermes-api:8787').re
 // Per-service backend routing (see routing.js). Off unless the env vars are set.
 const { makeBackendFor } = require('./routing');
 const backendFor = makeBackendFor(API_BASE, process.env);
+const { serviceCatalog, publicService } = require('./services');
 // Carrier directory lives in the rsg-carrierhub app (different Supabase table +
 // service-role endpoint), reachable via the docker host gateway. No auth needed.
 const CARRIERHUB_URL = (process.env.CARRIERHUB_URL || 'http://172.17.0.1:3200').replace(/\/+$/, '');
@@ -54,6 +55,8 @@ const TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || '8000', 10);
 // timeout and would kill a legitimate submission mid-flight.
 const INTAKE_TIMEOUT_MS = parseInt(process.env.INTAKE_TIMEOUT_MS || '120000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const SERVICES = serviceCatalog(process.env);
+const SERVICE_HEALTH_TIMEOUT_MS = parseInt(process.env.SERVICE_HEALTH_TIMEOUT_MS || '2500', 10);
 
 // Portal route → backend REST path (read-only).
 const ROUTES = {
@@ -251,6 +254,46 @@ function sendJson(res, code, obj){
   res.end(body);
 }
 
+// Reachability probes for the portal's service directory. The response is
+// intentionally browser-safe: it names the owning repo and connection mode but
+// never returns internal URLs, tokens, or credential configuration.
+function probeService(service){
+  if (!service.healthUrl) {
+    return Promise.resolve({ status:'connected', detail:'Secure external workspace' });
+  }
+  return new Promise((resolve) => {
+    const target = url.parse(service.healthUrl);
+    const lib = target.protocol === 'https:' ? https : http;
+    const headers = { 'Accept':'application/json' };
+    if (service.auth === 'hermes' && API_TOKEN) headers.Authorization = 'Bearer ' + API_TOKEN;
+    if (service.auth === 'intake' && INTAKE_KEY) headers['X-RSG-API-Key'] = INTAKE_KEY;
+    let finished = false;
+    const done = (value) => { if (!finished) { finished = true; resolve(value); } };
+    const req = lib.request({
+      protocol:target.protocol, hostname:target.hostname, port:target.port,
+      path:target.path, method:'GET', headers:headers,
+    }, (up) => {
+      up.resume();
+      if (up.statusCode >= 200 && up.statusCode < 300) done({ status:'online', detail:'Responding normally' });
+      else if (up.statusCode === 401 || up.statusCode === 403) done({ status:'attention', detail:'Authentication needs review' });
+      else done({ status:'attention', detail:'Service returned ' + up.statusCode });
+    });
+    req.setTimeout(SERVICE_HEALTH_TIMEOUT_MS, () => { req.destroy(); done({ status:'offline', detail:'Health check timed out' }); });
+    req.on('error', () => done({ status:'offline', detail:'Service is not responding' }));
+    req.end();
+  });
+}
+
+async function serviceStatuses(){
+  const probes = new Map();
+  const results = await Promise.all(SERVICES.map(async (service) => {
+    const key = (service.healthUrl || service.id) + '|' + service.auth;
+    if (!probes.has(key)) probes.set(key, probeService(service));
+    return publicService(service, await probes.get(key));
+  }));
+  return { checked_at:new Date().toISOString(), services:results };
+}
+
 // Proxy a GET to a full upstream URL, normalizing every failure to { _error } @ 200.
 // opts.noAuth omits the Hermes bearer (used for the carrierhub directory).
 function proxyGet(fullUrl, res, opts){
@@ -389,6 +432,10 @@ const server = http.createServer((req, res) => {
     ok: true, backend: API_BASE, token: API_TOKEN ? 'set' : 'missing',
     intake: INTAKE_URL, intake_key: INTAKE_KEY ? 'set' : 'missing'
   });
+
+  if (p === '/api/services' && req.method === 'GET') {
+    return serviceStatuses().then((result) => sendJson(res, 200, result));
+  }
 
   // The intake gateway's own operator UI, served on this origin so its
   // root-relative /api/* calls land back here and get forwarded below.

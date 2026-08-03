@@ -6,6 +6,8 @@ WORKDIR /app
 # No runtime dependencies; copy the app as-is.
 COPY package.json ./
 COPY server.js ./
+COPY routing.js ./
+COPY services.js ./
 COPY public ./public
 
 ENV NODE_ENV=production
