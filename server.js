@@ -31,6 +31,7 @@ const API_BASE = (process.env.HERMES_API_URL || 'http://rsg-hermes-api:8787').re
 // Per-service backend routing (see routing.js). Off unless the env vars are set.
 const { makeBackendFor } = require('./routing');
 const backendFor = makeBackendFor(API_BASE, process.env);
+const { serviceCatalog, publicService } = require('./services');
 // Carrier directory lives in the rsg-carrierhub app (different Supabase table +
 // service-role endpoint), reachable via the docker host gateway. No auth needed.
 const CARRIERHUB_URL = (process.env.CARRIERHUB_URL || 'http://172.17.0.1:3200').replace(/\/+$/, '');
@@ -54,11 +55,23 @@ const TIMEOUT_MS = parseInt(process.env.UPSTREAM_TIMEOUT_MS || '8000', 10);
 // timeout and would kill a legitimate submission mid-flight.
 const INTAKE_TIMEOUT_MS = parseInt(process.env.INTAKE_TIMEOUT_MS || '120000', 10);
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const SERVICES = serviceCatalog(process.env);
+const SERVICE_HEALTH_TIMEOUT_MS = parseInt(process.env.SERVICE_HEALTH_TIMEOUT_MS || '2500', 10);
+
+// Whether the cases split is flipped on. The hub and the cases service do not
+// expose tasks at the same path or with the same defaults, so the rewrite below
+// has to know which one it is talking to. Reading the env var directly (rather
+// than asking routing.js) keeps the two decisions — WHERE a path goes, and WHAT
+// shape that backend wants — from drifting apart.
+const CASES_SPLIT = !!process.env.HERMES_CASES_URL;
 
 // Portal route → backend REST path (read-only).
 const ROUTES = {
   '/api/renewals':    '/api/command-center/renewals',
-  '/api/tasks':       '/api/command-center/tasks',
+  // Tasks moved to googrlc/rsg-hermes-cases, which serves /api/tasks directly
+  // rather than under /api/command-center. Unflipped, this must stay pointed at
+  // the hub or an un-split deployment loses its task list.
+  '/api/tasks':       CASES_SPLIT ? '/api/tasks' : '/api/command-center/tasks',
   '/api/retention':   '/api/command-center/retention',
   '/api/commissions': '/api/commissions',
   '/api/cases':       '/api/cases',
@@ -71,6 +84,25 @@ const ROUTES = {
   '/api/pipeline':    '/api/opportunities',
   '/api/quotes':      '/api/quotes'
 };
+
+// Query the backend needs but the portal path does not carry.
+//
+// The hub's task list was already open-only; the cases service returns every
+// status unless asked. Without this the Tasks panel silently gains cancelled
+// work the moment the split is flipped — verified against both backends: hub 17
+// tasks, cases 18, cases?open_only=true 17, same set.
+//
+// Kept separate from ROUTES rather than baked into the path because routing.js
+// matches on a bare prefix; '/api/tasks?open_only=true' matches no prefix and
+// would fall straight back to the hub.
+const EXTRA_QUERY = CASES_SPLIT ? { '/api/tasks': 'open_only=true' } : {};
+
+function withQuery(path, search, extra){
+  const parts = [];
+  if (search) parts.push(String(search).replace(/^\?/, ''));
+  if (extra) parts.push(extra);
+  return path + (parts.length ? '?' + parts.join('&') : '');
+}
 
 // Leads reads NowCerts live and is the slowest thing the backend exposes; it gets
 // the intake budget rather than the 8s dashboard one so it degrades to an empty
@@ -110,8 +142,16 @@ const WRITE_ROUTES = [
   // Tasks — create, edit, complete.
   { m: 'POST',   re: /^\/api\/tasks$/ },
   { m: 'PATCH',  re: /^\/api\/tasks\/([0-9a-f-]{36})$/ },
-  { m: 'POST',   re: /^\/api\/tasks\/([0-9a-f-]{36})\/complete$/,
-    to: '/api/command-center/tasks/$1/complete' },
+  // Completing a task is the one route the split genuinely changes shape on.
+  // The hub had a dedicated POST .../complete; the cases service has no such
+  // endpoint and expects the state transition as an ordinary edit — PATCH
+  // /api/tasks/{id} with {"status":"completed"}. So this rewrites the method and
+  // supplies the body, rather than just the path.
+  CASES_SPLIT
+    ? { m: 'POST', re: /^\/api\/tasks\/([0-9a-f-]{36})\/complete$/,
+        to: '/api/tasks/$1', method: 'PATCH', body: { status: 'completed' } }
+    : { m: 'POST', re: /^\/api\/tasks\/([0-9a-f-]{36})\/complete$/,
+        to: '/api/command-center/tasks/$1/complete' },
 
   // Cases — open (ad-hoc or from a template), edit, close with its resolution,
   // or delete outright. Deleting takes the case's tasks, timeline and document
@@ -222,7 +262,8 @@ function matchWrite(method, p){
   for (const r of WRITE_ROUTES) {
     if (r.m !== method) continue;
     const hit = p.match(r.re);
-    if (hit) return { path: r.to ? r.to.replace('$1', hit[1]) : p, timeoutMs: r.timeoutMs };
+    if (hit) return { path: r.to ? r.to.replace('$1', hit[1]) : p, timeoutMs: r.timeoutMs,
+                      method: r.method, body: r.body };
   }
   return null;
 }
@@ -249,6 +290,46 @@ function sendJson(res, code, obj){
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(body);
+}
+
+// Reachability probes for the portal's service directory. The response is
+// intentionally browser-safe: it names the owning repo and connection mode but
+// never returns internal URLs, tokens, or credential configuration.
+function probeService(service){
+  if (!service.healthUrl) {
+    return Promise.resolve({ status:'connected', detail:'Secure external workspace' });
+  }
+  return new Promise((resolve) => {
+    const target = url.parse(service.healthUrl);
+    const lib = target.protocol === 'https:' ? https : http;
+    const headers = { 'Accept':'application/json' };
+    if (service.auth === 'hermes' && API_TOKEN) headers.Authorization = 'Bearer ' + API_TOKEN;
+    if (service.auth === 'intake' && INTAKE_KEY) headers['X-RSG-API-Key'] = INTAKE_KEY;
+    let finished = false;
+    const done = (value) => { if (!finished) { finished = true; resolve(value); } };
+    const req = lib.request({
+      protocol:target.protocol, hostname:target.hostname, port:target.port,
+      path:target.path, method:'GET', headers:headers,
+    }, (up) => {
+      up.resume();
+      if (up.statusCode >= 200 && up.statusCode < 300) done({ status:'online', detail:'Responding normally' });
+      else if (up.statusCode === 401 || up.statusCode === 403) done({ status:'attention', detail:'Authentication needs review' });
+      else done({ status:'attention', detail:'Service returned ' + up.statusCode });
+    });
+    req.setTimeout(SERVICE_HEALTH_TIMEOUT_MS, () => { req.destroy(); done({ status:'offline', detail:'Health check timed out' }); });
+    req.on('error', () => done({ status:'offline', detail:'Service is not responding' }));
+    req.end();
+  });
+}
+
+async function serviceStatuses(){
+  const probes = new Map();
+  const results = await Promise.all(SERVICES.map(async (service) => {
+    const key = (service.healthUrl || service.id) + '|' + service.auth;
+    if (!probes.has(key)) probes.set(key, probeService(service));
+    return publicService(service, await probes.get(key));
+  }));
+  return { checked_at:new Date().toISOString(), services:results };
 }
 
 // Proxy a GET to a full upstream URL, normalizing every failure to { _error } @ 200.
@@ -312,12 +393,24 @@ function proxyPass(req, res, fullUrl, opts){
   if (API_TOKEN) headers['Authorization'] = 'Bearer ' + API_TOKEN;
   if (INTAKE_KEY) headers['X-RSG-API-Key'] = INTAKE_KEY;
 
+  // A route may restate the request for a backend that spells the same
+  // operation differently — see the task-complete entry in WRITE_ROUTES. When it
+  // supplies a body we send that instead of the client's, so the incoming body
+  // must not also be piped, and content-length has to be recomputed: forwarding
+  // the original length against a different payload hangs the upstream waiting
+  // for bytes that never arrive.
+  const body = opts.body ? Buffer.from(JSON.stringify(opts.body)) : null;
+  if (body) {
+    headers['content-type'] = 'application/json';
+    headers['content-length'] = String(body.length);
+  }
+
   const upstream = lib.request({
     protocol: target.protocol,
     hostname: target.hostname,
     port: target.port,
     path: target.path,
-    method: req.method,
+    method: opts.method || req.method,
     headers: headers
   }, (up) => {
     const out = {};
@@ -337,7 +430,8 @@ function proxyPass(req, res, fullUrl, opts){
     else res.end();
   });
 
-  req.pipe(upstream);
+  if (body) { req.resume(); upstream.end(body); }   // drain the client, send ours
+  else req.pipe(upstream);
 }
 
 function serveStatic(reqPath, res){
@@ -390,6 +484,10 @@ const server = http.createServer((req, res) => {
     intake: INTAKE_URL, intake_key: INTAKE_KEY ? 'set' : 'missing'
   });
 
+  if (p === '/api/services' && req.method === 'GET') {
+    return serviceStatuses().then((result) => sendJson(res, 200, result));
+  }
+
   // The intake gateway's own operator UI, served on this origin so its
   // root-relative /api/* calls land back here and get forwarded below.
   if (p === '/intake' || p === '/intake/') {
@@ -411,7 +509,8 @@ const server = http.createServer((req, res) => {
       const writeTarget = matchWrite(req.method, p);
       if (writeTarget) {
         return proxyPass(req, res, backendFor(writeTarget.path) + writeTarget.path + (parsed.search || ''),
-                         { timeoutMs: writeTarget.timeoutMs || TIMEOUT_MS });
+                         { timeoutMs: writeTarget.timeoutMs || TIMEOUT_MS,
+                           method: writeTarget.method, body: writeTarget.body });
       }
       return sendJson(res, 405, {
         _error: 'not an allowed write',
@@ -430,6 +529,9 @@ const server = http.createServer((req, res) => {
                       { timeoutMs: Math.max(TIMEOUT_MS, 45000) });
     }
     const backendPath = ROUTES[p];
+    if (backendPath && EXTRA_QUERY[p]) {
+      return proxyGet(backendFor(backendPath) + withQuery(backendPath, parsed.search, EXTRA_QUERY[p]), res);
+    }
     if (!backendPath) return sendJson(res, 404, { _error: 'unknown api route' });
     return proxyGet(backendFor(backendPath) + backendPath + (parsed.search || ''), res);
   }
