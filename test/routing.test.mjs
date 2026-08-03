@@ -1,7 +1,7 @@
 // Routing table checks. The property that matters most is the first one: with
 // no env set this change must be a no-op, or merging it silently repoints
 // production traffic.
-import { makeBackendFor } from './routing.js';
+import { makeBackendFor } from '../routing.js';
 import assert from 'node:assert';
 
 const HUB = 'http://rsg-hermes-api:8787';
