@@ -2793,43 +2793,56 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
   var FIN_COLS = [
     ['carrier','Carrier'], ['policy','Policy'], ['client','Client'],
+    // Effective is the close/won month the desk works — "This month" keys off it.
+    ['effective','Effective','date', function(r){ return (r._raw||{}).policy_effective_date || (r._raw||{}).statement_date; }],
     // expected/received render as "$1,170"; money sorting parses them back.
     ['expected','Expected','money'], ['received','Received','money'], ['status','Status'],
   ];
+
+  // Chase worklist membership. Reconciled money leaves this list; new business
+  // (pending) and shorts stay until they clear.
+  var FIN_CHASE_KEYS = {
+    pending:1, missing_statement:1, underpaid:1, overpaid:1, no_expected:1, canceled:1
+  };
 
   function finYm(iso){
     if(!iso) return '';
     var s = (''+iso).slice(0,7); // YYYY-MM
     return /^\d{4}-\d{2}$/.test(s) ? s : '';
   }
-  function finCloseYm(r){
-    // Close / won month for the worklist: prefer AMS effective, then statement_date
-    // (commission sync seeds statement_date from effective when no statement yet).
+  function finEffectiveYm(r){
+    // Strict: effective date is the close month. statement_date is only a
+    // fallback when the AMS effective has not landed on the row yet.
     var raw = r._raw || {};
-    return finYm(raw.policy_effective_date) || finYm(raw.statement_date) || finYm(r.closeYm);
+    return finYm(raw.policy_effective_date) || finYm(r.effectiveIso) || finYm(raw.statement_date) || finYm(r.closeYm);
   }
   function currentYm(){
     var d = new Date();
     return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
   }
+  function financeChaseRows(rows){
+    return (rows||[]).filter(function(r){ return !!FIN_CHASE_KEYS[r.statusKey]; });
+  }
   function financeFilter(rows){
+    var chase = financeChaseRows(rows);
     var live = listFor('finance').live || 'all';
     var ym = currentYm();
-    if(live === 'short') return rows.filter(function(r){ return r.statusKey === 'underpaid'; });
-    if(live === 'pending') return rows.filter(function(r){
+    if(live === 'short') return chase.filter(function(r){ return r.statusKey === 'underpaid'; });
+    if(live === 'pending') return chase.filter(function(r){
       return r.statusKey === 'pending' || r.statusKey === 'missing_statement';
     });
-    if(live === 'month') return rows.filter(function(r){ return finCloseYm(r) === ym; });
-    return rows;
+    if(live === 'month') return chase.filter(function(r){ return finEffectiveYm(r) === ym; });
+    return chase; // All = open chase items only (reconciled already dropped)
   }
   function financeFilterChips(rows){
+    var chase = financeChaseRows(rows);
     var ym = currentYm();
-    var nAll = rows.length;
+    var nAll = chase.length;
     var nShort = 0, nPending = 0, nMonth = 0;
-    rows.forEach(function(r){
+    chase.forEach(function(r){
       if(r.statusKey === 'underpaid') nShort++;
       if(r.statusKey === 'pending' || r.statusKey === 'missing_statement') nPending++;
-      if(finCloseYm(r) === ym) nMonth++;
+      if(finEffectiveYm(r) === ym) nMonth++;
     });
     var st = listFor('finance');
     var chip = function(v, label, onStyle, offStyle){
@@ -2837,7 +2850,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return '<span data-live="finance:'+v+'" style="font-size:12px;font-weight:600;border-radius:999px;padding:5px 13px;cursor:pointer;'
         +(on?onStyle:offStyle)+'">'+label+'</span>';
     };
-    return chip('all','All · '+nAll,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2')
+    return chip('all','Open · '+nAll,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2')
       + chip('short','Short · '+nShort,'color:#fff;background:#B4231F','color:#B4231F;background:#FBE9E7')
       + chip('pending','Pending · '+nPending,'color:#fff;background:#B9822A','color:#B9822A;background:#F7EEDB')
       + chip('month','This month · '+nMonth,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2');
@@ -2865,17 +2878,18 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
     if(st.page > pages - 1) st.page = pages - 1;
     var pageRows = sortedFor('finance', FIN_COLS, visible).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
+    var finGrid = 'display:grid;grid-template-columns:1.15fr 1fr 1.15fr .85fr .8fr .8fr .9fr;gap:12px;';
     var rows = pageRows.map(function(r){
       var s = r.statusColor ? [r.statusColor, r.statusBg] : (vStat[r.status] || ['#6B7078','#EFEFEC']);
       var openId = r.id ? (' data-finopen="'+esc(r.id)+'"') : '';
-      return '<div class="tile rowh"'+openId+' style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
+      return '<div class="tile rowh"'+openId+' style="'+finGrid+'padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-variant-numeric:tabular-nums">'+r.effective+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
     }).join('');
 
     var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
         + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#B9822A;font-weight:700">Money workstation</div>'
           + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Chase what\'s owed.</h1>'
-          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">New business and mid-term closes for the month sit here until a statement lands and they reconcile. Open a row to work it, or open the full Commission Tracker to import statements.</p></div>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Open commission work only — pending new business, shorts, and unpriced pays. Reconciled rows leave this list. This month = effective date in the current calendar month.</p></div>'
         + '<div data-finance="embed" style="flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#fff;background:#B9822A;border-radius:9px;padding:9px 14px;font-weight:600;cursor:pointer">Open full Commission Tracker ↗</div>'
       + '</div>'
       + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
@@ -2883,7 +2897,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         + financeFilterChips(finRows)
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
-        + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('finance', FIN_COLS) + '</div>'
+        + '<div style="'+finGrid+'padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('finance', FIN_COLS) + '</div>'
         + (rows || panelEmpty('commissions', 'commission rows'))
         + pager('finance', visible.length)
       + '</div>'
@@ -3610,11 +3624,14 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         }
       }
       var sm = vStat[stInfo.label]||['#6B7078','#EFEFEC'];
+      var effIso = r.policy_effective_date || r.statement_date || null;
       return {
         id: r.id || null,
         carrier:(r.carrier||r.carrier_name||'—'),
         policy:(r.policy_number||r.policy||'—'),
         client:(r.client||r.client_name||r.insured||'—'),
+        effective: shortDate(effIso) || '—',
+        effectiveIso: effIso,
         expected:money(exp),
         received:money(rec),
         status:stInfo.label,
@@ -3625,21 +3642,26 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         _raw: r,
       };
     });
-    // KPIs over the full ledger (not the active chip filter), so tiles stay honest.
-    var owed=0, received=0, variances=0;
-    list.forEach(function(r){
+    // KPIs over OPEN chase rows — reconciled money has left this workstation.
+    var chase = financeChaseRows(finRows);
+    var owed=0, pendingAmt=0, variances=0;
+    chase.forEach(function(row){
+      var r = row._raw || {};
       var exp=Number(r.expected_commission!=null?r.expected_commission:(r.expected_amount!=null?r.expected_amount:r.expected))||0;
       var rec=Number(r.actual_commission!=null?r.actual_commission:(r.actual_amount!=null?r.actual_amount:(r.received!=null?r.received:r.paid_amount)))||0;
-      received += rec;
       if(exp>rec){ owed += (exp-rec); variances++; }
       else if(rec>exp){ variances++; }
+      else if(row.statusKey === 'pending' || row.statusKey === 'missing_statement' || row.statusKey === 'no_expected'){
+        pendingAmt += exp;
+        if(exp>0) variances++;
+      }
     });
     financeOwed = owed;
     finKpis = [
-      { label:'Commission owed', value:money(owed), sub:'expected not received', color:'#B9822A' },
-      { label:'Received', value:money(received), sub:'reconciled', color:'#2563EB' },
-      { label:'Variances', value:String(variances), sub:'expected \u2260 received', color:'#B4231F' },
-      { label:'Ledger rows', value:String(list.length), sub:'in the book', color:'#1B1D22' },
+      { label:'Commission owed', value:money(owed), sub:'short + still outstanding', color:'#B9822A' },
+      { label:'Pending expected', value:money(pendingAmt), sub:'awaiting statement', color:'#2563EB' },
+      { label:'Open variances', value:String(variances), sub:'need a look', color:'#B4231F' },
+      { label:'Open to chase', value:String(chase.length), sub:'reconciled left this list', color:'#1B1D22' },
     ];
     sources.commissions='live'; return true;
   }
