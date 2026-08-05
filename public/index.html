@@ -118,7 +118,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   // ------------------------------------------------------------------
   // State
   // ------------------------------------------------------------------
-  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false, crmView:'workspace', client:null };
+  var state = { screen:'home', user:'lamar', done:{}, aiOpen:false, detail:false, caseDetail:false, carrierEmbed:false, financeEmbed:false, financeDetail:false, crmView:'workspace', client:null };
   function setState(patch){ Object.assign(state, patch); render(); }
 
   // Per-section data source. Starts 'pending' and only ever becomes 'live' — the
@@ -399,8 +399,17 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     { label:'Variances', value:'—', sub:'expected ≠ received', color:'#B4231F' },
     { label:'Ledger rows', value:'—', sub:'in the book', color:'#1B1D22' },
   ];
-  var vStat = { 'Short':['#B4231F','#FBE9E7'],'Received':['#2563EB','#E9EFFC'],'Pending':['#B9822A','#F7EEDB'] };
-  var finRows = [];
+  var vStat = {
+    'Short':['#B4231F','#FBE9E7'],
+    'Received':['#2563EB','#E9EFFC'],
+    'Pending':['#B9822A','#F7EEDB'],
+    'Excess':['#6D28D9','#EDE7FB'],
+    'No expected':['#787C84','#EFEFEC'],
+    'Canceled':['#787C84','#EFEFEC'],
+  };
+  var finRows = [];      // mapped worklist rows (full ledger, not capped)
+  var finStatusCounts = {}; // reconciliation_status → count from the API
+  var selFinance = null; // raw + mapped row opened in the detail pane
 
   var headers = {
     home:{ title:'Home', sub:'Risk Solutions Group · agency command center' },
@@ -2150,7 +2159,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   var PAGE_SIZE = 50;
 
   function listFor(key){
-    if (!listState[key]) listState[key] = { sort:null, dir:1, page:0, live:'all' };
+    // Finance defaults to this calendar month's closes — the desk works
+    // "what closed this month and still needs reconciling" before month-end.
+    if (!listState[key]) listState[key] = { sort:null, dir:1, page:0, live:(key==='finance'?'month':'all') };
     return listState[key];
   }
 
@@ -2786,35 +2797,145 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['expected','Expected','money'], ['received','Received','money'], ['status','Status'],
   ];
 
+  function finYm(iso){
+    if(!iso) return '';
+    var s = (''+iso).slice(0,7); // YYYY-MM
+    return /^\d{4}-\d{2}$/.test(s) ? s : '';
+  }
+  function finCloseYm(r){
+    // Close / won month for the worklist: prefer AMS effective, then statement_date
+    // (commission sync seeds statement_date from effective when no statement yet).
+    var raw = r._raw || {};
+    return finYm(raw.policy_effective_date) || finYm(raw.statement_date) || finYm(r.closeYm);
+  }
+  function currentYm(){
+    var d = new Date();
+    return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+  }
+  function financeFilter(rows){
+    var live = listFor('finance').live || 'all';
+    var ym = currentYm();
+    if(live === 'short') return rows.filter(function(r){ return r.statusKey === 'underpaid'; });
+    if(live === 'pending') return rows.filter(function(r){
+      return r.statusKey === 'pending' || r.statusKey === 'missing_statement';
+    });
+    if(live === 'month') return rows.filter(function(r){ return finCloseYm(r) === ym; });
+    return rows;
+  }
+  function financeFilterChips(rows){
+    var ym = currentYm();
+    var nAll = rows.length;
+    var nShort = 0, nPending = 0, nMonth = 0;
+    rows.forEach(function(r){
+      if(r.statusKey === 'underpaid') nShort++;
+      if(r.statusKey === 'pending' || r.statusKey === 'missing_statement') nPending++;
+      if(finCloseYm(r) === ym) nMonth++;
+    });
+    var st = listFor('finance');
+    var chip = function(v, label, onStyle, offStyle){
+      var on = st.live === v;
+      return '<span data-live="finance:'+v+'" style="font-size:12px;font-weight:600;border-radius:999px;padding:5px 13px;cursor:pointer;'
+        +(on?onStyle:offStyle)+'">'+label+'</span>';
+    };
+    return chip('all','All · '+nAll,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2')
+      + chip('short','Short · '+nShort,'color:#fff;background:#B4231F','color:#B4231F;background:#FBE9E7')
+      + chip('pending','Pending · '+nPending,'color:#fff;background:#B9822A','color:#B9822A;background:#F7EEDB')
+      + chip('month','This month · '+nMonth,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2');
+  }
+  function financeStatusLabel(raw){
+    var s = (''+(raw||'')).trim().toLowerCase();
+    if(s === 'underpaid') return { label:'Short', key:'underpaid' };
+    if(s === 'overpaid') return { label:'Excess', key:'overpaid' };
+    if(s === 'reconciled') return { label:'Received', key:'reconciled' };
+    if(s === 'no_expected') return { label:'No expected', key:'no_expected' };
+    if(s === 'canceled' || s === 'cancelled') return { label:'Canceled', key:'canceled' };
+    if(s === 'missing_statement') return { label:'Pending', key:'missing_statement' };
+    if(s === 'pending' || !s) return { label:'Pending', key:'pending' };
+    return { label: s.charAt(0).toUpperCase()+s.slice(1), key:s };
+  }
+
   function renderFinance(){
     if(state.financeEmbed){ return embedPane('Finance overview', COMMISSION_EMBED, 'data-finance', 'Full Commission Tracker · live'); }
     var kpis = finKpis.map(function(k){
       return '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:11px;padding:14px 16px"><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+k.label+'</div><div style="font-family:\'Newsreader\',Georgia,serif;font-size:26px;color:'+k.color+';margin-top:4px;line-height:1">'+k.value+'</div><div style="font-size:11px;color:#9A9EA6;margin-top:3px">'+k.sub+'</div></div>';
     }).join('');
-    var rows = sortedFor('finance', FIN_COLS, finRows).map(function(r){
+
+    var visible = financeFilter(finRows);
+    var st = listFor('finance');
+    var pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+    if(st.page > pages - 1) st.page = pages - 1;
+    var pageRows = sortedFor('finance', FIN_COLS, visible).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
+    var rows = pageRows.map(function(r){
       var s = r.statusColor ? [r.statusColor, r.statusBg] : (vStat[r.status] || ['#6B7078','#EFEFEC']);
-      return '<div class="tile rowh" style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
+      var openId = r.id ? (' data-finopen="'+esc(r.id)+'"') : '';
+      return '<div class="tile rowh"'+openId+' style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
     }).join('');
 
-    return '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
+    var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
         + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#B9822A;font-weight:700">Money workstation</div>'
           + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Chase what\'s owed.</h1>'
-          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Every carrier statement reconciled against expected commission from the CRM ledger. Variances surface here; open the full Commission Tracker to import statements and reconcile.</p></div>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">New business and mid-term closes for the month sit here until a statement lands and they reconcile. Open a row to work it, or open the full Commission Tracker to import statements.</p></div>'
         + '<div data-finance="embed" style="flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#fff;background:#B9822A;border-radius:9px;padding:9px 14px;font-weight:600;cursor:pointer">Open full Commission Tracker ↗</div>'
       + '</div>'
       + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
-      + '<div style="display:flex;gap:7px;margin-bottom:11px">'
-        + '<span style="font-size:12px;font-weight:600;color:#fff;background:#16233F;border-radius:999px;padding:5px 13px;cursor:pointer">All · 6</span>'
-        + '<span style="font-size:12px;font-weight:600;color:#B4231F;background:#FBE9E7;border-radius:999px;padding:5px 13px;cursor:pointer">Short · 3</span>'
-        + '<span style="font-size:12px;font-weight:600;color:#B9822A;background:#F7EEDB;border-radius:999px;padding:5px 13px;cursor:pointer">Pending · 1</span>'
-        + '<span style="font-size:12px;font-weight:600;color:#3D4149;background:#fff;border:1px solid #E6E6E2;border-radius:999px;padding:5px 13px;cursor:pointer">This month</span>'
+      + '<div style="display:flex;gap:7px;margin-bottom:11px;flex-wrap:wrap">'
+        + financeFilterChips(finRows)
       + '</div>'
       + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;overflow:hidden">'
         + '<div style="display:grid;grid-template-columns:1.2fr 1.1fr 1.3fr .9fr .9fr 1fr;gap:12px;padding:11px 18px;background:#FAFAF7;border-bottom:1px solid #EFEFEB;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#96999F;font-weight:700">' + sortHeader('finance', FIN_COLS) + '</div>'
         + (rows || panelEmpty('commissions', 'commission rows'))
+        + pager('finance', visible.length)
       + '</div>'
     + '</div>';
+
+    // Detail pane — open a July close (or any row) without leaving the workstation.
+    var live = selFinance;
+    var detailOn = state.financeDetail && live;
+    var ovBase = 'position:absolute;inset:0;z-index:6;background:#F3F4F6;overflow:auto;transition:transform .34s cubic-bezier(.4,0,.2,1),opacity .3s ease;';
+    var detailStyle = ovBase + (detailOn?'transform:translateX(0);opacity:1;pointer-events:auto':'transform:translateX(4%);opacity:0;pointer-events:none');
+    var sm = live ? (vStat[live.status] || ['#6B7078','#EFEFEC']) : ['#6B7078','#EFEFEC'];
+    var raw = (live && live._raw) || {};
+    var facts = live ? [
+      { label:'Carrier', value:live.carrier },
+      { label:'Policy #', value:live.policy },
+      { label:'Client', value:live.client },
+      { label:'LOB', value:raw.lob || '—' },
+      { label:'Expected', value:live.expected },
+      { label:'Received', value:live.received },
+      { label:'Effective / close', value:shortDate(raw.policy_effective_date)||shortDate(raw.statement_date)||'—' },
+      { label:'Term end', value:shortDate(raw.policy_expiration_date)||'—' },
+      { label:'Cancel date', value:shortDate(raw.cancellation_date)||'—' },
+      { label:'Statement date', value:shortDate(raw.statement_date)||'—' },
+      { label:'Status', value:live.status },
+      { label:'Delta', value:money(raw.delta) },
+    ].map(function(f){
+      return '<div><div style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:#96999F;font-weight:700">'+f.label+'</div><div style="font-size:13.5px;color:#25282E;margin-top:3px">'+f.value+'</div></div>';
+    }).join('') : '';
+
+    var detail = '<div style="'+detailStyle+'">'
+      + '<div style="position:sticky;top:0;background:#FBF9F4;border-bottom:1px solid #ECEAE2;padding:14px 26px;display:flex;align-items:center;gap:14px;z-index:2">'
+        + '<div data-findetail="close" title="Back (Esc)" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:#6B7078;cursor:pointer;font-weight:600">‹ Money workstation</div>'
+        + '<div style="width:1px;height:22px;background:#E2E1DC"></div>'
+        + '<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:10px"><span style="font-family:\'Newsreader\',Georgia,serif;font-size:20px;color:#1B1D22;line-height:1">'+(live?live.client:'—')+'</span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+sm[0]+';background:'+sm[1]+'">'+(live?live.status:'—')+'</span></div><div style="font-size:12px;color:#7A7E86;margin-top:2px">'+(live?live.carrier+' · '+live.policy:'')+'</div></div>'
+        + '<div data-finance="embed" style="display:inline-flex;align-items:center;gap:7px;font-size:11.5px;color:#fff;background:#B9822A;border-radius:8px;padding:7px 13px;font-weight:600;cursor:pointer">Open in Commission Tracker ↗</div>'
+      + '</div>'
+      + '<div style="padding:24px 26px 40px;max-width:720px">'
+        + '<div style="background:#fff;border:1px solid #E7E7E4;border-radius:13px;padding:18px 20px">'
+          + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22;margin-bottom:14px">Commission row</div>'
+          + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px">'+facts+'</div>'
+          + '<p style="margin:16px 0 0;font-size:12px;color:#787C84;line-height:1.5">'
+            + (live && (live.statusKey==='pending'||live.statusKey==='missing_statement')
+              ? 'Waiting on a carrier statement for this term. Import the statement in the Commission Tracker to book received commission and clear Pending.'
+              : (live && live.statusKey==='underpaid'
+                ? 'Expected exceeds received — chase the short in the Commission Tracker reconciliation queue.'
+                : 'Open the full Commission Tracker to import statements, fix rates, or reconcile.'))
+          + '</p>'
+        + '</div>'
+      + '</div>'
+    + '</div>';
+
+    return '<div style="position:absolute;inset:0">'+list+detail+'</div>';
   }
 
   // ---- Carrier Hub (hybrid: native at-a-glance + embed of full carrierhub) ----
@@ -3122,6 +3243,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     }
     if(state.screen === 'cases' && state.caseDetail){ setState({ caseDetail:false }); return true; }
     if(state.carrierEmbed){ setState({ carrierEmbed:false }); return true; }
+    if(state.financeDetail){ selFinance = null; setState({ financeDetail:false }); return true; }
     if(state.financeEmbed){ setState({ financeEmbed:false }); return true; }
     if(state.screen === 'crm' && state.client) return closeClient();
     if(state.screen === 'crm' && state.crmView !== 'workspace'){
@@ -3140,7 +3262,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
   });
 
   document.getElementById('app').addEventListener('click', function(e){
-    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-boardpan],[data-renewalrestore],[data-renfilter],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance]');
+    var el = e.target.closest('[data-kind],[data-live],[data-retry],[data-boardpan],[data-renewalrestore],[data-renfilter],[data-sort],[data-page],[data-deal],[data-lead],[data-policyrow],[data-board],[data-client],[data-policy],[data-work],[data-edit],[data-caseopen],[data-go],[data-crmview],[data-aichip],[data-toggle],[data-user],[data-ai],[data-detail],[data-casedetail],[data-carrier],[data-finance],[data-finopen],[data-findetail]');
     if(!el) return;
 
     // Sorting: same column again flips direction, a new one starts ascending.
@@ -3314,7 +3436,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         return;
       }
       selRenewal = null;
-      setState({ screen: target, detail:false, caseDetail:false, aiOpen:false, carrierEmbed:false, financeEmbed:false });
+      setState({ screen: target, detail:false, caseDetail:false, aiOpen:false, carrierEmbed:false, financeEmbed:false, financeDetail:false });
+      if(target !== 'finance') selFinance = null;
       return;
     }
     if(el.hasAttribute('data-carrier')){
@@ -3322,7 +3445,21 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       return;
     }
     if(el.hasAttribute('data-finance')){
-      setState({ financeEmbed: el.getAttribute('data-finance')==='embed' });
+      setState({ financeEmbed: el.getAttribute('data-finance')==='embed', financeDetail:false });
+      return;
+    }
+    if(el.hasAttribute('data-finopen')){
+      var fid = el.getAttribute('data-finopen');
+      selFinance = null;
+      for(var fi=0; fi<finRows.length; fi++){
+        if(String(finRows[fi].id) === String(fid)){ selFinance = finRows[fi]; break; }
+      }
+      setState({ financeDetail: !!selFinance });
+      return;
+    }
+    if(el.hasAttribute('data-findetail')){
+      if(el.getAttribute('data-findetail')==='close'){ selFinance = null; }
+      setState({ financeDetail: el.getAttribute('data-findetail')==='open' });
       return;
     }
     if(el.hasAttribute('data-toggle')){
@@ -3450,17 +3587,45 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
 
   function applyCommissions(d){
     var list = Array.isArray(d)?d:(d&&Array.isArray(d.rows)?d.rows:(d&&Array.isArray(d.commissions)?d.commissions:null));
-    if(!list || !list.length) return false;
-    finRows = list.slice(0,12).map(function(r){
-      var exp=(r.expected_amount!=null?r.expected_amount:r.expected);
-      var rec=(r.actual_amount!=null?r.actual_amount:(r.received!=null?r.received:r.paid_amount));
-      var st = r.status || ((rec==null||rec===0)?'Pending':(exp!=null&&rec<exp?'Short':'Received'));
-      st = (''+st).charAt(0).toUpperCase()+(''+st).slice(1).toLowerCase();
-      var sm = vStat[st]||['#6B7078','#EFEFEC'];
-      return { carrier:(r.carrier||r.carrier_name||'—'), policy:(r.policy_number||r.policy||'—'), client:(r.client||r.client_name||r.insured||'—'),
-               expected:money(exp), received:money(rec), status:st, statusColor:sm[0], statusBg:sm[1] };
+    if(!Array.isArray(list)) return false;
+    finStatusCounts = (d && d.counts_by_status) ? d.counts_by_status : {};
+    // Map the ledger field names the Hermes /api/commissions surface actually returns.
+    // Truncating to 12 rows made July closes disappear under older reconciled noise.
+    finRows = list.map(function(r){
+      var exp = r.expected_commission!=null ? r.expected_commission
+              : (r.expected_amount!=null ? r.expected_amount : r.expected);
+      var rec = r.actual_commission!=null ? r.actual_commission
+              : (r.actual_amount!=null ? r.actual_amount
+                : (r.received!=null ? r.received : r.paid_amount));
+      var stInfo = financeStatusLabel(r.reconciliation_status || r.status);
+      // Fall back for APIs that omit reconciliation_status.
+      if(!(r.reconciliation_status||r.status)){
+        if(rec==null || rec===0 || rec===''){
+          if(exp==null || exp==='' || Number(exp)===0) stInfo = financeStatusLabel('pending');
+          else stInfo = financeStatusLabel('pending');
+        } else if(exp!=null && Number(rec) < Number(exp)) {
+          stInfo = financeStatusLabel('underpaid');
+        } else {
+          stInfo = financeStatusLabel('reconciled');
+        }
+      }
+      var sm = vStat[stInfo.label]||['#6B7078','#EFEFEC'];
+      return {
+        id: r.id || null,
+        carrier:(r.carrier||r.carrier_name||'—'),
+        policy:(r.policy_number||r.policy||'—'),
+        client:(r.client||r.client_name||r.insured||'—'),
+        expected:money(exp),
+        received:money(rec),
+        status:stInfo.label,
+        statusKey:stInfo.key,
+        statusColor:sm[0],
+        statusBg:sm[1],
+        closeYm: finYm(r.policy_effective_date) || finYm(r.statement_date),
+        _raw: r,
+      };
     });
-    // Finance KPIs from the same live rows, so the tiles can't drift from the table.
+    // KPIs over the full ledger (not the active chip filter), so tiles stay honest.
     var owed=0, received=0, variances=0;
     list.forEach(function(r){
       var exp=Number(r.expected_commission!=null?r.expected_commission:(r.expected_amount!=null?r.expected_amount:r.expected))||0;
@@ -3542,7 +3707,9 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     // The removals ride along with the list they explain the absences from.
     loadRenewalRemovals().then(render);
     pull('/api/tasks').then(function(d){ if(applyTasks(d)){ homeFromLive(); render(); } });
-    pull('/api/commissions').then(function(d){ if(applyCommissions(d)){ homeFromLive(); render(); } });
+    // status=all — default API filter is "reconciled", which hid every July
+    // close still waiting on a statement (pending / missing_statement / short).
+    pull('/api/commissions?status=all').then(function(d){ if(applyCommissions(d)){ homeFromLive(); render(); } });
     pull('/api/cases').then(function(d){ if(applyCases(d)){ homeFromLive(); render(); } });
     // The kanban's columns come from the backend, so the board and the stage
     // move it performs cannot disagree about what a stage is.
