@@ -1,0 +1,7 @@
+{
+  "install": "npm install --no-audit --no-fund",
+  "repositoryDependencies": [
+    "github.com/googrlc/rsg-hermes",
+    "github.com/googrlc/rsg-cptintake"
+  ]
+}
