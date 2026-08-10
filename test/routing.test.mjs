@@ -48,4 +48,62 @@ check('trailing slashes on the base are trimmed', () => {
   assert.equal(b('/api/cases'), 'http://c:8802');
 });
 
+// ── CRM carve-out (HERMES_CRM_URL) ──────────────────────────────────────────
+
+check('the CRM split moves the client book, pipeline and leads together', () => {
+  const CRM = 'http://rsg-hermes-crm:8805';
+  const b = makeBackendFor(HUB, { HERMES_CRM_URL: CRM });
+  for (const p of ['/api/clients', '/api/policies', '/api/quotes',
+                   '/api/workspace-stats', '/api/opportunities',
+                   '/api/pipeline', '/api/leads']) {
+    assert.equal(b(p), CRM, p + ' did not follow the CRM split');
+  }
+  // Everything else stays on the hub.
+  assert.equal(b('/api/renewals'), HUB, 'renewals moved when only CRM was flipped');
+  assert.equal(b('/api/cases'), HUB, 'cases moved when only CRM was flipped');
+  assert.equal(b('/api/commissions'), HUB, 'finance moved when only CRM was flipped');
+});
+
+check('CRM sub-paths follow their prefix (client 360, push-to-ams)', () => {
+  const CRM = 'http://crm:8805';
+  const b = makeBackendFor(HUB, { HERMES_CRM_URL: CRM });
+  assert.equal(b('/api/clients/abc-123'), CRM);
+  assert.equal(b('/api/policies/abc-123/push-to-ams'), CRM);
+  assert.equal(b('/api/opportunities/xyz/stage'), CRM);
+});
+
+check('leads and pipeline prefer the CRM over the intake split', () => {
+  const CRM = 'http://crm:8805', INTAKE = 'http://intake:8803';
+  const b = makeBackendFor(HUB, { HERMES_CRM_URL: CRM, HERMES_INTAKE_URL: INTAKE });
+  assert.equal(b('/api/leads'), CRM, 'leads should follow the CRM once it exists');
+  assert.equal(b('/api/pipeline'), CRM, 'pipeline should follow the CRM once it exists');
+  // The intake gateway split itself still owns /api/intake.
+  assert.equal(b('/api/intake'), INTAKE, 'intake left the intake split');
+});
+
+check('without a CRM, leads and pipeline still follow the intake split', () => {
+  // Non-breaking guard: a deployment running the intake split but no CRM must
+  // see leads and pipeline exactly where they were before this change.
+  const INTAKE = 'http://intake:8803';
+  const b = makeBackendFor(HUB, { HERMES_INTAKE_URL: INTAKE });
+  assert.equal(b('/api/leads'), INTAKE);
+  assert.equal(b('/api/pipeline'), INTAKE);
+  // /api/opportunities was never on the intake split — it stayed on the hub.
+  assert.equal(b('/api/opportunities'), HUB, 'opportunities drifted onto the intake split');
+  assert.equal(b('/api/clients'), HUB, 'the client book drifted off the hub');
+});
+
+check('opportunities takes the CRM only, never the intake split', () => {
+  const CRM = 'http://crm:8805';
+  const b = makeBackendFor(HUB, { HERMES_CRM_URL: CRM });
+  assert.equal(b('/api/opportunities'), CRM);
+});
+
+check('the CRM prefix must not match a longer unrelated word', () => {
+  // /api/leads must not capture /api/leadsource; /api/clients not /api/clientsx
+  const b = makeBackendFor(HUB, { HERMES_CRM_URL: 'http://crm:8805' });
+  assert.equal(b('/api/leadsource'), HUB);
+  assert.equal(b('/api/clientsx'), HUB);
+});
+
 console.log(`\n${n} passed`);
