@@ -2795,8 +2795,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     ['carrier','Carrier'], ['policy','Policy'], ['client','Client'],
     // Effective is the close/won month the desk works — "This month" keys off it.
     ['effective','Effective','date', function(r){ return (r._raw||{}).policy_effective_date || (r._raw||{}).statement_date; }],
-    // expected/received render as "$1,170"; money sorting parses them back.
-    ['expected','Expected','money'], ['received','Received','money'], ['status','Status'],
+    ['billing','Billing'],
+    // expected/received/agency fee render as money; sorting parses them back.
+    ['expected','Expected','money'], ['agencyFee','Agency fee','money'],
+    ['received','Received','money'], ['status','Status'],
   ];
 
   // Chase worklist membership. Reconciled money leaves this list; new business
@@ -2831,6 +2833,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     if(live === 'pending') return chase.filter(function(r){
       return r.statusKey === 'pending' || r.statusKey === 'missing_statement';
     });
+    if(live === 'agency') return chase.filter(function(r){ return r.billingKey === 'agency'; });
     if(live === 'month') return chase.filter(function(r){ return finEffectiveYm(r) === ym; });
     return chase; // All = open chase items only (reconciled already dropped)
   }
@@ -2838,10 +2841,11 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var chase = financeChaseRows(rows);
     var ym = currentYm();
     var nAll = chase.length;
-    var nShort = 0, nPending = 0, nMonth = 0;
+    var nShort = 0, nPending = 0, nMonth = 0, nAgency = 0;
     chase.forEach(function(r){
       if(r.statusKey === 'underpaid') nShort++;
       if(r.statusKey === 'pending' || r.statusKey === 'missing_statement') nPending++;
+      if(r.billingKey === 'agency') nAgency++;
       if(finEffectiveYm(r) === ym) nMonth++;
     });
     var st = listFor('finance');
@@ -2853,6 +2857,7 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     return chip('all','Open · '+nAll,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2')
       + chip('short','Short · '+nShort,'color:#fff;background:#B4231F','color:#B4231F;background:#FBE9E7')
       + chip('pending','Pending · '+nPending,'color:#fff;background:#B9822A','color:#B9822A;background:#F7EEDB')
+      + chip('agency','Agency Bill · '+nAgency,'color:#fff;background:#16233F','color:#16233F;background:#E8ECF3')
       + chip('month','This month · '+nMonth,'color:#fff;background:#16233F','color:#3D4149;background:#fff;border:1px solid #E6E6E2');
   }
   function financeStatusLabel(raw){
@@ -2878,18 +2883,19 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
     var pages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
     if(st.page > pages - 1) st.page = pages - 1;
     var pageRows = sortedFor('finance', FIN_COLS, visible).slice(st.page * PAGE_SIZE, (st.page + 1) * PAGE_SIZE);
-    var finGrid = 'display:grid;grid-template-columns:1.15fr 1fr 1.15fr .85fr .8fr .8fr .9fr;gap:12px;';
+    var finGrid = 'display:grid;grid-template-columns:1.05fr .9fr 1.05fr .75fr .85fr .7fr .7fr .7fr .85fr;gap:10px;';
     var rows = pageRows.map(function(r){
       var s = r.statusColor ? [r.statusColor, r.statusBg] : (vStat[r.status] || ['#6B7078','#EFEFEC']);
       var openId = r.id ? (' data-finopen="'+esc(r.id)+'"') : '';
-      return '<div class="tile rowh"'+openId+' style="'+finGrid+'padding:13px 18px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13.5px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:12px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12.5px;color:#6B7078">'+r.client+'</span><span style="font-size:12.5px;color:#3D4149;font-variant-numeric:tabular-nums">'+r.effective+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
+      var billTone = (r.billingKey === 'agency') ? 'color:#B9822A;font-weight:600;' : 'color:#6B7078;';
+      return '<div class="tile rowh"'+openId+' style="'+finGrid+'padding:13px 14px;border-bottom:1px solid #F2F2EE;align-items:center;cursor:pointer"><span style="font-size:13px;color:#25282E;font-weight:500">'+r.carrier+'</span><span style="font-size:11.5px;color:#6B7078;font-family:ui-monospace,Menlo,monospace">'+r.policy+'</span><span style="font-size:12px;color:#6B7078">'+r.client+'</span><span style="font-size:12px;color:#3D4149;font-variant-numeric:tabular-nums">'+r.effective+'</span><span style="font-size:11.5px;'+billTone+'">'+r.billing+'</span><span style="font-size:12.5px;color:#3D4149;font-weight:600">'+r.expected+'</span><span style="font-size:12.5px;color:#3D4149">'+r.agencyFee+'</span><span style="font-size:12.5px;color:#3D4149">'+r.received+'</span><span><span style="font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;color:'+s[0]+';background:'+s[1]+'">'+r.status+'</span></span></div>';
     }).join('');
 
     var list = '<div style="position:absolute;inset:0;overflow:auto;padding:26px 30px '+AI_FAB_CLEARANCE+'">'
       + '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px">'
         + '<div><div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#B9822A;font-weight:700">Money workstation</div>'
           + '<h1 style="font-family:\'Newsreader\',Georgia,serif;font-size:28px;color:#1B1D22;margin:5px 0 3px;font-weight:500">Chase what\'s owed.</h1>'
-          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Open commission work only — pending new business, shorts, and unpriced pays. Reconciled rows leave this list. This month = effective date in the current calendar month.</p></div>'
+          + '<p style="font-size:12.5px;color:#787C84;margin:0 0 20px;max-width:560px;line-height:1.5">Open commission work only — pending new business, shorts, and unpriced pays. Agency Bill is badged (not the same as waiting on a carrier PDF). Agency fee is what RSG charged the insured. Reconciled rows leave this list.</p></div>'
         + '<div data-finance="embed" style="flex:none;display:inline-flex;align-items:center;gap:7px;font-size:12px;color:#fff;background:#B9822A;border-radius:9px;padding:9px 14px;font-weight:600;cursor:pointer">Open full Commission Tracker ↗</div>'
       + '</div>'
       + '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px">'+kpis+'</div>'
@@ -2915,6 +2921,8 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       { label:'Policy #', value:live.policy },
       { label:'Client', value:live.client },
       { label:'LOB', value:raw.lob || '—' },
+      { label:'Billing', value:live.billing || '—' },
+      { label:'Agency fee', value:live.agencyFee },
       { label:'Expected', value:live.expected },
       { label:'Received', value:live.received },
       { label:'Effective / close', value:shortDate(raw.policy_effective_date)||shortDate(raw.statement_date)||'—' },
@@ -2939,11 +2947,13 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
           + '<div style="font-family:\'Newsreader\',Georgia,serif;font-size:17px;color:#1B1D22;margin-bottom:14px">Commission row</div>'
           + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 24px">'+facts+'</div>'
           + '<p style="margin:16px 0 0;font-size:12px;color:#787C84;line-height:1.5">'
-            + (live && (live.statusKey==='pending'||live.statusKey==='missing_statement')
-              ? 'Waiting on a carrier statement for this term. Import the statement in the Commission Tracker to book received commission and clear Pending.'
-              : (live && live.statusKey==='underpaid'
-                ? 'Expected exceeds received — chase the short in the Commission Tracker reconciliation queue.'
-                : 'Open the full Commission Tracker to import statements, fix rates, or reconcile.'))
+            + (live && live.billingKey==='agency'
+              ? 'Agency Bill — RSG bills the insured. Agency fee is shop income (not a carrier short). Still chase commission until received is booked.'
+              : (live && (live.statusKey==='pending'||live.statusKey==='missing_statement')
+                ? 'Waiting on a carrier statement for this term. Import the statement in the Commission Tracker to book received commission and clear Pending.'
+                : (live && live.statusKey==='underpaid'
+                  ? 'Expected exceeds received — chase the short in the Commission Tracker reconciliation queue.'
+                  : 'Open the full Commission Tracker to import statements, fix rates, or reconcile.')))
           + '</p>'
         + '</div>'
       + '</div>'
@@ -3625,6 +3635,13 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
       }
       var sm = vStat[stInfo.label]||['#6B7078','#EFEFEC'];
       var effIso = r.policy_effective_date || r.statement_date || null;
+      var billRaw = (r.billing_type || r.billingType || '').toString().trim();
+      var billKey = /agency/i.test(billRaw) ? 'agency' : (/direct/i.test(billRaw) ? 'direct' : '');
+      var billLabel = billRaw || '—';
+      if (billKey === 'agency' && !/100/.test(billRaw)) billLabel = 'Agency Bill';
+      if (billKey === 'direct' && !/100/.test(billRaw)) billLabel = 'Direct Bill';
+      var fee = r.agency_fee_amount!=null ? r.agency_fee_amount
+              : (r.admin_fee_amount!=null ? r.admin_fee_amount : r.agencyFee);
       return {
         id: r.id || null,
         carrier:(r.carrier||r.carrier_name||'—'),
@@ -3632,7 +3649,10 @@ a{color:#2563EB;text-decoration:none}a:hover{color:#1d4ed8}
         client:(r.client||r.client_name||r.insured||'—'),
         effective: shortDate(effIso) || '—',
         effectiveIso: effIso,
+        billing: billLabel,
+        billingKey: billKey,
         expected:money(exp),
+        agencyFee:money(fee),
         received:money(rec),
         status:stInfo.label,
         statusKey:stInfo.key,
